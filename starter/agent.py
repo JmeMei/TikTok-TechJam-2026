@@ -38,7 +38,7 @@ class Agent:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
-        self._sessions: set[str] = set()
+        self._sessions: dict[str, list[str]] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -72,7 +72,8 @@ class Agent:
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         # The profile is anonymized and may be used for personalization.
-        self._sessions.add(session_id)
+        # Start an empty transcript for this session.
+        self._sessions[session_id] = []
 
     def respond(
         self,
@@ -83,7 +84,11 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        # CHANGE 1: accumulate. Search everything the customer has said so far,
+        # not just the newest sentence.
+        history = self._sessions[session_id]
+        history.append(user_message)
+        unique_terms = list(dict.fromkeys(_terms(" ".join(history))))[:60]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
         if not expression:
             recommendations: list[dict] = []
@@ -95,8 +100,10 @@ class Agent:
             ).fetchall()
             recommendations = [{"parent_asin": str(row[0])} for row in rows]
         return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
+            "message": "Here are the closest matches I found. Anything else that matters?",
+            # CHANGE 2: always ask. A null attribute makes the customer reveal
+            # nothing at all; "other" matches any constraint it has not told us yet.
+            "ask_attribute": "other",
             "recommendations": recommendations,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
