@@ -143,8 +143,3 @@ Stated plainly, because these are real.
 
 ---
 
-## Team
-
-| Member | Contribution |
-|---|---|
-| _TODO_ | _TODO_ |
