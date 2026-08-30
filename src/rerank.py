@@ -28,13 +28,14 @@ CROSS_ENCODER_DIR = Path("models/cross-encoder")
 # Funnel widths. Budgeted knob (CLAUDE.md section 9) -- k-fold before changing.
 # CE_WIDTH is how many fused candidates the cross-encoder scores. Cost is linear in it,
 # and it was the dominant term in a 25s/session smoke run at 50.
-# DEFAULT OFF -- measured, see eval/RESULTS.md run 3c. On the full 200 the cross-encoder
-# is +0.041 on buying and +0.009 on browsing but -0.164 on intent_override, netting
-# -0.0077. The override loss is NOT the ranker's fault: with erasure unimplemented, the
-# stale pre-override decoy still leads the distilled query, and a cross-encoder
-# concentrates on it where BM25 dilutes it. Re-enable with TECHJAM_CE_WIDTH=25 once
-# override erasure lands -- it is then expected to be worth about +0.02.
-CE_WIDTH = int(os.environ.get("TECHJAM_CE_WIDTH", "0"))
+# DEFAULT ON at 25 -- see eval/RESULTS.md runs 3c-5. It was default-off while the distilled
+# query was still poisoned by the un-erased override decoy (then -0.0077 net). With erasure,
+# promotion and the adaptive skip in place it is +0.049 on buying and +0.026 on browsing,
+# with intent_override held at exactly its lexical-track value by the orchestrator's
+# skip_rerank gate. Aggregate 0.76125 -> 0.77773.
+# Caveat kept deliberately visible: the paired 95% CI still crosses zero at n=200, and
+# boundary (n=10) regresses. Set TECHJAM_CE_WIDTH=0 to fall back to the pure lexical track.
+CE_WIDTH = int(os.environ.get("TECHJAM_CE_WIDTH", "25"))
 PREFILTER_WIDTH = 15
 
 
@@ -138,7 +139,13 @@ class Ranker:
     def _documents(self, candidates: list[str]) -> list[str]:
         return [self.doc_text.get(asin, asin) for asin in candidates]
 
-    def rank(self, query: str, candidates: list[str], limit: int = 10) -> RankResult:
+    def rank(
+        self,
+        query: str,
+        candidates: list[str],
+        limit: int = 10,
+        use_cross_encoder: bool = True,
+    ) -> RankResult:
         """Reorder `candidates`, returning at most `limit`.
 
         Stage 1 is a passthrough: no weights are installed yet, so the RRF/BM25 order
@@ -153,7 +160,7 @@ class Ranker:
         flat = False
         tokens = 0
 
-        if query:
+        if query and use_cross_encoder:
             # --- rung 1: cross-encoder over the head of the fused list ---
             # Only the head is scored: cost is linear in width, and an item the fused
             # ranking put 40th is not a plausible rank-1. The tail keeps its RRF order.

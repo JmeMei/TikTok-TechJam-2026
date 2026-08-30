@@ -14,6 +14,12 @@ Every eval run gets a row. Never claim an improvement that is not written here.
 | 3a | 2026-08-31 | adf486e | Control: dense live, CE off (`TECHJAM_CE_WIDTH=0`) | **0.69589** | 0.8100 | 0.5073 | 4.07 | 0.694 | 0.7750 | 0.8375 | 0.8000 | 0.9000 | isolates dense |
 | 3b | 2026-08-31 | adf486e | Control: dense off + CE off — **reproduces run 2 exactly** | **0.76035** | 0.8900 | 0.5452 | 3.41 | 0.759 | 0.9000 | 0.8875 | 0.8667 | 0.9000 | **IDENTICAL to run 2** |
 | 3c | 2026-08-31 | adf486e | Dense off, CE on — isolates the cross-encoder alone | **0.75262** | 0.8800 | 0.5311 | 3.34 | 0.767 | 0.9250 | 0.8875 | 0.7333 | 0.9000 | split verdict, see notes |
+| 4 | 2026-08-31 | 81508a3 | + override erasure (CE on) | **0.76574** | 0.8900 | 0.5545 | 3.28 | 0.772 | 0.9250 | 0.8875 | 0.8000 | 0.9000 | override 0.596 -> 0.684 |
+| 4a | 2026-08-31 | 81508a3 | + promote override constraint to lead the query (CE on) | **0.76799** | 0.8950 | 0.5530 | 3.27 | 0.773 | 0.9250 | 0.8875 | 0.8333 | 0.9000 | override -> 0.699 |
+| 4b | 2026-08-31 | 81508a3 | + adaptive skip_rerank on override (CE on) | **0.77723** | 0.9000 | 0.5694 | 3.18 | 0.782 | 0.9250 | 0.8875 | 0.8667 | 0.9000 | override restored to lexical |
+| 4c | 2026-08-31 | 81508a3 | + refusal-pollution fix (CE on) | **0.77743** | 0.9000 | 0.5701 | 3.18 | 0.782 | 0.9250 | 0.8875 | 0.8667 | 0.9000 | correct, ~neutral |
+| 5 | 2026-08-31 | (this) | + drained/unavailable bookkeeping — **shipping config** | **0.77773** | 0.9000 | 0.5701 | 3.17 | 0.784 | 0.9250 | 0.8875 | 0.8667 | 0.9000 | **KEEP (+0.0165)** |
+| 5c | 2026-08-31 | (this) | Control: same code, CE off — new lexical floor | **0.76125** | 0.8900 | 0.5452 | 3.37 | 0.764 | 0.9000 | 0.8875 | 0.8667 | 0.9000 | offline floor |
 
 ## Run 0 notes — where the losses are
 
@@ -154,3 +160,78 @@ fed a poisoned query on 15% of sessions.
 
 **Shipping state until then:** dense track and cross-encoder both OFF. Best is run 2's
 0.76035, reproduced exactly as run 3b — which also re-verifies the pipeline end to end.
+
+## Runs 4-5 notes — override erasure, and what it did and did not buy
+
+Run 3 predicted that implementing override erasure would make the cross-encoder net-positive.
+It did, but only in combination with two further changes, and the aggregate gain is **not
+statistically significant at n=200**. Both halves of that sentence matter.
+
+**The four increments, each measured on the full 200 with the CE on:**
+
+| increment | TS | intent_override |
+|---|---|---|
+| CE only, no erasure (run 3c) | 0.75262 | 0.5964 |
+| + erase the retracted opening constraint | 0.76574 | 0.6838 |
+| + promote the new constraint to lead the query | 0.76799 | 0.6988 |
+| + adaptive `skip_rerank` on override | 0.77723 | **0.7605** |
+| + refusal fix + drained bookkeeping (**shipping**) | **0.77773** | 0.7605 |
+
+Erasure alone recovered +0.087 on the override scenario, and leading with the new constraint
+another +0.015 — but neither closed the gap to the lexical track's 0.7605. What closed it was
+declining to rerank at all once an override has fired: after an override the customer has one
+strong verbatim constraint, and BM25 exact matching is already near-optimal on it, so semantic
+reranking blurs a lexical match it cannot improve. That is Pillar III adaptive orchestration
+choosing a stage from session state, and it is **one condition, not a tuned threshold**.
+
+**Verification that the gate is exact.** Per-session paired deltas on the 30 override
+sessions: `0.00000, 0/0/30` — every one is byte-identical to the lexical track. The skip does
+what it claims and nothing else.
+
+**Two real defects found in distillation while doing this**, both invisible to BM25 and both
+harmful to a cross-encoder, which weighs a short string instead of diluting it across 60 OR'd
+terms:
+
+1. `BOILERPLATE` covered `"an additional preference"` but not the bare article, so
+   `"I don't have a preference for color; please use your judgment."` survived intact and
+   entered the ranker's query as if it were a disclosed constraint.
+2. When it did match it left the attribute name behind, injecting `other` — the agent's own
+   question — into its own query as content.
+
+Refusals now drop whole. Correct, and worth +0.0003: BM25 was already diluting the noise, so
+the fix is principled rather than profitable. `drained`/`unavailable` are now populated from
+the same parse, which makes `exhausted()` real and saves a turn (MTTC 3.41 -> 3.37).
+
+### The honest statistics — this gain is not proven
+
+Paired per-session deltas, same 200 sessions, shipping config vs its own CE-off control:
+
+| scenario | n | mean delta | 95% CI | better/worse |
+|---|---|---|---|---|
+| buying | 80 | **+0.0409** | [-0.0031, +0.0849] | 32 / 16 |
+| browsing | 80 | +0.0078 | [-0.0520, +0.0677] | 25 / 24 |
+| intent_override | 30 | +0.0000 | exact no-op | 0 / 0 |
+| boundary | 10 | -0.0602 | [-0.1330, +0.0126] | 1 / 4 |
+| **aggregate** | 200 | **+0.0165** | **[-0.0135, +0.0465]** | 58 / 44 |
+
+**The aggregate CI crosses zero (1.08 sigma), and only 3 of 5 folds improve.** The k-fold
+spread is 0.095, far wider than the gain. The single real effect is on **buying** (+0.041,
+1.82 sigma, 2:1 better-to-worse); browsing is a coin flip.
+
+Kept anyway, on three grounds, and flagged rather than claimed:
+1. The point estimate is positive on the 160 sessions the ranker still runs on.
+2. These are mechanisms, not tuned constants — CLAUDE.md section 9's generalisation concern is
+   about fitted thresholds, and the only new condition is a boolean read off dialogue state.
+3. Override erasure is **required** by Pillar II regardless of score, and it is now verified
+   score-neutral on the lexical track (5c reproduces the floor exactly).
+
+The private set is 800 sessions; a real +0.016 becomes ~2.2 sigma there. **This is the first
+entry in the ledger that should be re-checked against the private result rather than trusted.**
+
+**Boundary regresses (-0.060) and is deliberately not fixed.** n=10 cannot resolve a 0.06
+effect, HR@10 is identical (0.9000) with only MRR moving, and special-casing a scenario
+observed in the public set is exactly what CLAUDE.md section 9 forbids.
+
+**Degradation verified:** with `models/` renamed away the agent falls back to the lexical
+track at exactly 0.76125 and does not crash. That is the offline floor, and no paid LLM is
+required to reach it.

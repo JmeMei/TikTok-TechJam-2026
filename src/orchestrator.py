@@ -54,6 +54,7 @@ class Plan:
     truncation: int = 50
     escalate_listwise: bool = False
     stop_asking: bool = False
+    rerank: bool = True
     profile_terms: list[str] = field(default_factory=list)
     notes: list[tuple[str, str, str]] = field(default_factory=list)  # (kind, choice, trigger)
 
@@ -81,6 +82,20 @@ class Orchestrator:
             dense_weight=route.dense_weight,
             truncation=route.truncation,
         )
+
+        # Adaptive orchestration: choose the ranking stage from what the session has become,
+        # not from a fixed pipeline. After an override the customer has one strong, verbatim
+        # constraint, and BM25 exact matching is already near-optimal on it -- semantic
+        # reranking blurs a lexical match it cannot improve. Measured across three runs
+        # (eval/RESULTS.md 3c/4/4a): the cross-encoder is +0.041 buying and +0.026 browsing
+        # but negative on every override configuration, even with a fully cleaned query.
+        if getattr(state, "override_seen", False):
+            plan.rerank = False
+            plan.notes.append((
+                "skip_rerank",
+                "trust the lexical track",
+                "override installed a single verbatim constraint; BM25 is already precise",
+            ))
 
         # Self-refining guidance logic: two consecutive empty asks means asking is spent.
         recent = self.history[-2:]

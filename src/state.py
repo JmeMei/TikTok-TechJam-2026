@@ -62,6 +62,39 @@ BOILERPLATE = re.compile(
     re.I,
 )
 
+# The two refusal shapes (local_evaluator.py:168-169, 183). Both mean "this question
+# revealed nothing", so the message carries ZERO preference information and must not reach
+# the ranker at all. Stripping them piecewise is not enough and was actively harmful:
+#   * "I don't have a preference for color; please use your judgment."  -- the BOILERPLATE
+#     alternation covered "an additional preference" but not the bare article, so the whole
+#     sentence survived and entered the query as if it were a disclosed constraint.
+#   * "I don't have an additional preference for other."  -- stripped down to the bare
+#     attribute name, injecting the agent's OWN question back into its query as content.
+# BM25 dilutes such noise across dozens of OR'd terms; a cross-encoder weighs the whole
+# short string, so this cost the ranking stage far more than it cost retrieval.
+REFUSAL_RE = re.compile(r"i don'?t have (?:an?\s+)?(?:additional\s+)?preference", re.I)
+
+# The same two shapes, but capturing WHICH bucket came back empty, so the policy can stop
+# asking questions that cannot pay. `drained` = the constraint pool holds nothing matching
+# that bucket; `unavailable` = the one-shot boundary refusal (local_evaluator.py:168-169).
+DRAINED_RE = re.compile(
+    r"i don'?t have an additional preference for (?P<attr>[a-z_]+)", re.I
+)
+UNAVAILABLE_RE = re.compile(
+    r"i don'?t have a preference for (?P<attr>[a-z_]+); please use your judgment", re.I
+)
+
+# The intent-override sentence, emitted verbatim at turn 3 or 4 (local_evaluator.py:76-86):
+#     "Actually, ignore my earlier preference. What I need is: {new_value}."
+# The clause after "What I need is:" is hard_constraints[0] -- the real target constraint.
+# Everything the customer stated in the OPENING is explicitly retracted by this sentence.
+# Matched before BOILERPLATE strips the phrasing, so this must be applied to the raw message.
+OVERRIDE_RE = re.compile(
+    r"actually,?\s*ignore my earlier preference\.?\s*"
+    r"(?:what i need is:?\s*(?P<new>.*))?",
+    re.I,
+)
+
 
 @dataclass
 class DistilledContext:
@@ -70,6 +103,9 @@ class DistilledContext:
     slots: dict[str, list[str]] = field(default_factory=dict)
     profile_tags: list[str] = field(default_factory=list)
     category_hint: str = ""
+    # The constraint an override installed. Leads the query: "erase and rewrite" means the
+    # new intent takes primacy, not equal billing at the end of a list of older values.
+    priority: str = ""
     disclosures: list[str] = field(default_factory=list)
 
     def as_query(self) -> str:
@@ -81,6 +117,12 @@ class DistilledContext:
         good candidates rather than improve them.
         """
         parts: list[str] = []
+        # An override rewrites the goal, so its constraint leads and the category follows.
+        # Position is not cosmetic here: the cross-encoder truncates at 384 tokens and
+        # weighs the whole string, so a constraint appended last competes on equal terms
+        # with every older value instead of governing them.
+        if self.priority:
+            parts.append(self.priority)
         if self.category_hint:
             parts.append(self.category_hint)
         for bucket, values in self.slots.items():
@@ -109,6 +151,15 @@ class SessionState:
 
         self.slots: dict[str, list[Slot]] = {}
         self.erased: list[str] = []          # slots dropped by an intent override
+
+        # The opening message is "{coarse_category}. {constraint}" for buying and
+        # intent_override, and bare "{coarse_category}" for browsing
+        # (local_evaluator.py:154-163). Splitting it is what makes erasure possible:
+        # the category survives an override, the constraint after it does not.
+        self.opening_category = ""
+        self.opening_extra = ""
+        self.override_turn: int | None = None
+        self.override_constraint = ""
         self.disclosed_last: list[str] = []  # constraints revealed on the latest turn
         self.gained_terms: list[str] = []    # new search terms from the latest reply
 
@@ -133,12 +184,74 @@ class SessionState:
         self.turn = turn
         before = set(self.query_terms())
         self.transcript.append(message if isinstance(message, str) else "")
+        if len(self.transcript) == 1:
+            self._split_opening()
         self.disclosed_last = []
+        self._apply_override(self.transcript[-1], turn)
+        self._apply_refusal(self.transcript[-1])
         # Did this reply actually tell us anything? Until Stage 5 parses constraints,
         # "new search terms arrived" is the honest observable proxy. The orchestrator
         # needs a real signal here -- deriving `yielded` from disclosed_last before it is
         # populated makes it permanently False and fires stop_asking spuriously.
         self.gained_terms = sorted(set(self.query_terms()) - before)
+
+    def _split_opening(self) -> None:
+        """Separate the coarse category from the constraint the opening tacked on."""
+        cleaned = BOILERPLATE.sub(" ", self.transcript[0])
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;,")
+        head, separator, tail = cleaned.partition(". ")
+        if separator:
+            self.opening_category = head.strip(" .;,")
+            self.opening_extra = tail.strip(" .;,")
+        else:
+            self.opening_category = cleaned
+            self.opening_extra = ""
+
+    def _apply_override(self, message: str, turn: int) -> None:
+        """Intent override: ERASE the retracted preference, never append to it.
+
+        Pillar II requires contradictions to erase and rewrite rather than accumulate.
+        The customer says "ignore my earlier preference", and what they are pointing at
+        is the constraint carried by the opening message -- so that is what is dropped.
+
+        Only the distilled/ranking view is rewritten. `query_terms()` still spans the raw
+        transcript, so the lexical track is byte-identical and the BM25-only score is
+        unchanged. That is deliberate: the retracted value is `soft_preferences[-1]`, a
+        GENUINE attribute of the target product rather than a false one, so removing its
+        terms from retrieval risks recall. Demote it in ranking first; measure before
+        touching BM25.
+        """
+        if self.override_seen or not message:
+            return
+        match = OVERRIDE_RE.search(message)
+        if not match:
+            return
+        self.override_seen = True
+        self.override_turn = turn
+        if self.opening_extra:
+            self.erased.append(self.opening_extra)
+            self.opening_extra = ""
+        new_value = (match.group("new") or "").strip(" .;,")
+        if new_value:
+            self.override_constraint = new_value
+
+    def _apply_refusal(self, message: str) -> None:
+        """Record which buckets have been answered with "nothing".
+
+        `exhausted()` reads this. Once the `"other"` wildcard itself comes back empty the
+        constraint pool is provably drained -- `"other"` matches ANY undisclosed constraint
+        (local_evaluator.py:178-181), so no narrower question can succeed where it failed.
+        Asking again cannot pay, and the turn is better spent ranking.
+        """
+        if not message:
+            return
+        match = UNAVAILABLE_RE.search(message)
+        if match:
+            self.unavailable.add(match.group("attr").lower())
+            return
+        match = DRAINED_RE.search(message)
+        if match:
+            self.drained.add(match.group("attr").lower())
 
     # ---- retrieval interface --------------------------------------------
 
@@ -154,11 +267,16 @@ class SessionState:
         """Compact profile for the ranking stages (Pillar III context distillation)."""
         slots = {bucket: [s.text for s in items] for bucket, items in self.slots.items() if items}
         tags = self.user_profile.get("preference_tags") or []
+        priority = self.override_constraint
+        # The override message also lands in `disclosures` (boilerplate-stripped down to the
+        # bare constraint), so drop it there rather than stating the same value twice.
+        disclosures = [d for d in self.disclosures() if d.lower() != priority.lower()]
         return DistilledContext(
             slots=slots,
             profile_tags=[str(t) for t in tags if t],
             category_hint=self.category_hint(),
-            disclosures=self.disclosures(),
+            priority=priority,
+            disclosures=disclosures,
         )
 
     def disclosures(self) -> list[str]:
@@ -166,6 +284,10 @@ class SessionState:
         seen: set[str] = set()
         out: list[str] = []
         for message in self.transcript[1:]:
+            # A refusal answers the question with "nothing". Drop it whole -- there is no
+            # residue worth keeping, and its fragments are actively misleading.
+            if REFUSAL_RE.search(message):
+                continue
             cleaned = BOILERPLATE.sub(" ", message)
             cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;,")
             if cleaned and cleaned.lower() not in seen:
@@ -174,11 +296,15 @@ class SessionState:
         return out
 
     def category_hint(self) -> str:
-        """The opening message names the coarse category; it is the most stable signal."""
+        """The opening message names the coarse category; it is the most stable signal.
+
+        After an override `opening_extra` has been erased, so the retracted preference
+        stops leading the distilled query. The category itself always survives -- an
+        override changes what the customer wants, not what department they are shopping in.
+        """
         if not self.transcript:
             return ""
-        cleaned = BOILERPLATE.sub(" ", self.transcript[0])
-        return re.sub(r"\s+", " ", cleaned).strip(" .;,")
+        return ". ".join(part for part in (self.opening_category, self.opening_extra) if part)
 
     # ---- policy interface ------------------------------------------------
 

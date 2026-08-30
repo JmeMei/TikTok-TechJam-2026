@@ -112,8 +112,20 @@ class Agent:
         orchestrator = self._orchestrators[session_id]
         previous = self._last_telemetry.get(session_id, Telemetry())
 
+        was_overridden = state.override_seen
         state.observe(user_message, turn)
         trace = TurnTrace(session_id=session_id, turn=turn)
+        trace.slots_erased = list(state.erased)
+
+        # Pillar II: an override erases and rewrites. Log it on the turn it fires so the
+        # walkthrough can show the retraction happening rather than just its aftermath.
+        if state.override_seen and not was_overridden:
+            trace.decide(
+                "intent_override",
+                f"erase {state.erased or ['(nothing)']}",
+                "customer retracted their earlier preference",
+                f"now targeting: {state.override_constraint or 'unstated'}",
+            )
 
         # --- Pillar I: route ---
         route = router.route(state)
@@ -177,7 +189,12 @@ class Agent:
             )
         else:
             with trace.timed("rank"):
-                result = self.ranker.rank(orchestrator.distill(state), candidates, limit=top_k)
+                result = self.ranker.rank(
+                    orchestrator.distill(state),
+                    candidates,
+                    limit=top_k,
+                    use_cross_encoder=plan.rerank,
+                )
             order, stage = result.order, result.stage_reached
             movement, flat, tokens = result.movement, result.flat, result.tokens
 

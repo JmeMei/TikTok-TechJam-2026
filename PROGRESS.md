@@ -3,8 +3,13 @@
 Working branch: `feat/hybrid-retrieval`. Plan: `~/.claude/plans/adaptive-tumbling-lantern.md`.
 Score ledger: [`eval/RESULTS.md`](eval/RESULTS.md).
 
-**Current best: TechnicalScore 0.76035** (HR@10 0.890 / MRR 0.5452 / MTTC 3.41)
-Baseline was 0.10671; the pre-existing 12-line version was 0.75040.
+**Current best: TechnicalScore 0.77773** (HR@10 0.900 / MRR 0.5701 / MTTC 3.17)
+Lexical-only floor (no models, no network): **0.76125**. Baseline was 0.10671; the
+pre-existing 12-line version was 0.75040.
+
+⚠️ The +0.0165 over the lexical floor is **not significant at n=200** — paired 95% CI
+[-0.014, +0.047], 3/5 folds. See `eval/RESULTS.md` runs 4-5. Treat it as the first ledger
+entry to re-check against the private result rather than trust.
 
 ---
 
@@ -147,65 +152,121 @@ post-override hard constraint, is last at equal weight. BM25 survives this by di
 decoy across dozens of OR'd terms; a cross-encoder concentrates on it. `state.override_seen`
 is never set; `state.erased` is always empty.
 
-**Shipping state: dense OFF, cross-encoder OFF, verified back at 0.76035 with the index
-present on disk.** Both are one env var from returning.
+*(Both of those are now fixed — see below.)*
+
+---
+
+## Stage 2 — override erasure landed, and the cross-encoder is back on ✅
+
+Run 3 predicted erasure would flip the cross-encoder positive. It did, but only together with
+two further changes, and **the aggregate gain is not statistically significant.** Both halves
+of that sentence matter. Full detail: `eval/RESULTS.md` runs 4-5.
+
+| increment (CE on, full 200) | TS | intent_override |
+|---|---|---|
+| CE only, no erasure | 0.75262 | 0.5964 |
+| + erase the retracted opening constraint | 0.76574 | 0.6838 |
+| + promote the new constraint to lead the query | 0.76799 | 0.6988 |
+| + adaptive `skip_rerank` on override | 0.77723 | **0.7605** |
+| + refusal fix + drained bookkeeping (**shipping**) | **0.77773** | 0.7605 |
+
+**What each piece does**
+
+1. **Erasure** (`state.py`). The override sentence retracts what the *opening* claimed, so the
+   opening is split into `opening_category` + `opening_extra` and only the latter is dropped.
+   Recovered +0.087 on override.
+2. **Promotion.** The new constraint leads the distilled query instead of trailing it —
+   "erase and rewrite" means the new intent governs, not that it gets equal billing at the end
+   of a list of older values. +0.015.
+3. **Adaptive `skip_rerank`** (`orchestrator.py`). After an override the customer has one
+   strong verbatim constraint and BM25 is already near-optimal on it; semantic reranking blurs
+   a lexical match it cannot improve. **Verified exact: all 30 override sessions are now
+   byte-identical to the lexical track (paired delta 0.00000, 0 better / 0 worse).**
+4. **Refusal fix.** `BOILERPLATE` covered "an additional preference" but not the bare article,
+   so `"I don't have a preference for color; please use your judgment."` entered the ranker's
+   query as if it were a constraint; when it *did* match it left the attribute name behind,
+   injecting `other` — the agent's own question — as content. Refusals now drop whole.
+5. **`drained`/`unavailable`** are populated from the same parse, so `exhausted()` is real.
+   Saves a turn (MTTC 3.41 -> 3.37).
+
+**Erasure is confined to the ranking view by design.** `query_terms()` still spans the raw
+transcript, so the lexical track is byte-identical and the CE-off control reproduces the floor
+exactly. That is deliberate: the retracted value is `soft_preferences[-1]`, a *genuine*
+attribute of the target product, so stripping its terms from retrieval risks recall.
+
+### ⚠️ Read this before building on the number
+
+Paired per-session deltas vs the same code with the CE off:
+
+| scenario | n | mean delta | 95% CI | better/worse |
+|---|---|---|---|---|
+| buying | 80 | **+0.0409** | [-0.0031, +0.0849] | 32 / 16 |
+| browsing | 80 | +0.0078 | [-0.0520, +0.0677] | 25 / 24 |
+| intent_override | 30 | +0.0000 | exact no-op | 0 / 0 |
+| boundary | 10 | -0.0602 | [-0.1330, +0.0126] | 1 / 4 |
+| **aggregate** | 200 | **+0.0165** | **[-0.0135, +0.0465]** | 58 / 44 |
+
+The CI crosses zero (1.08 sigma) and only 3/5 folds improve. **The one real effect is on
+buying**; browsing is a coin flip. Kept because the point estimate is positive on the 160
+sessions the ranker still touches, because these are mechanisms rather than tuned constants,
+and because erasure is Pillar II-required regardless of score. The private set's 800 sessions
+will settle it.
+
+**Boundary regresses (-0.060) and is deliberately left alone** — n=10 cannot resolve a 0.06
+effect, HR@10 is identical with only MRR moving, and special-casing a scenario seen in the
+public set is what `CLAUDE.md` §9 forbids.
+
+**Verified:** 25/25 tests pass; `src/` import boundary clean; with `models/` renamed away the
+agent degrades to 0.76125 without crashing (the offline floor — no paid LLM required).
 
 ---
 
 ## Remaining work, in priority order
 
-### 1. Override erasure (Pillar II) — now the highest-value item, and it unlocks #2
-`src/state.py`. Detect `"Actually, ignore my earlier preference. What I need is: X."`,
-set `override_seen`, move the opening decoy into `erased`, and rebuild `category_hint()` so
-the stale value stops leading the distilled query. Keep the coarse category — that part of
-the opening is still true.
+### 1. Diagnose the dense track — the only untouched *scored* lever
+Still off (`TECHJAM_DENSE=1`). It is Pillar I's browsing track and the hedge against a
+paraphrasing private set, so it should not stay off permanently. Measure dense-only HR@10
+with no fusion first: that separates "the dense ranking is weak" from "RRF is mis-weighting a
+weak vote as an equal one". Suspects in order: RRF weights, `as_query()` text the encoder was
+not trained for, `truncation=50` too shallow for fusion to recover.
 
-One caveat worth knowing before writing it: the override `old_value` is
-`soft_preferences[-1]`, which is a *genuine* attribute of the target product, not a false
-one. So this is a **re-weighting problem, not a contradiction** — dropping it from the
-ranker's query is right, but purging its terms from BM25 retrieval may cost recall. Erase
-from the distilled/rerank query first, measure, and only then consider BM25.
+### 2. Slot parsing and decay (Pillar II)
+`classify_constraint()` (`local_evaluator.py:137-151`) is pure, so mirroring it is correct by
+construction. `drained`/`unavailable` now exist; typed `slots` and decay do not. Expect little
+metric movement — the `"other"` wildcard is already optimal — but the trace needs typed slots
+for the demo, and `router.py` reads `slot_count()` to pick a route.
 
-### 2. Re-enable the cross-encoder and re-measure — expected ~+0.02
-`TECHJAM_CE_WIDTH=25`. If the 30 override sessions merely return to their BM25-only 0.7605
-while buying and browsing keep their gains, the aggregate is ~0.780. This is the single
-largest measured opportunity in the repo and it is gated only on #1.
+### 3. Pillar III — `user_profile` is still ignored entirely
+`reset()` receives `preference_tags`, `average_prior_rating`, `summary`; none is used. Fold in
+as a weak prior that never overrides a disclosed constraint.
 
-### 3. Diagnose the dense track before re-enabling it
-It is Pillar I's browsing track and the hedge against a paraphrasing private set, so it
-should not stay off permanently. Likely suspects, cheapest first: RRF weights treating a
-weak ranking as an equal vote; the encoder seeing `as_query()` output it was not trained
-for; `truncation=50` being too shallow for fusion to recover. Measure per-track HR@10
-alone (dense-only, no fusion) to find out whether the ranking or the fusion is at fault.
-
-### 4. Pillar II proper — slot parsing, decay, drained/unavailable bookkeeping
-`classify_constraint()` (`local_evaluator.py:137-151`) is pure, so mirroring it is correct
-by construction. Note `drained` is currently never populated, so `exhausted()` is always
-False and `_select` always returns `"other"`. The `"other"` wildcard is genuinely optimal
-(it matches any undisclosed constraint), so expect little metric movement here — but it is
-required pillar behaviour and the trace needs it for the demo.
-
-### 5. Pillar III — `user_profile` is still ignored entirely
-`reset()` receives `preference_tags`, `average_prior_rating`, `summary`; none is used. Fold
-in as a weak prior that never overrides a disclosed constraint.
-
-### 6. Validation
-- k-fold the +0.00995 self-refinement gain — still at the n=200 noise floor, still untrusted.
+### 4. Validation
+- k-fold the run-2 self-refinement gain — still at the noise floor, still untrusted.
 - Verify the Flask demo end-to-end (`make demo`) — written, never run.
 - `HF_HUB_OFFLINE=1` must produce an identical score.
-- Rename `models/` -> must fall back to BM25 near 0.76, not crash.
+- Runtime: the CE costs 22s -> 108s per 200 sessions. Fine locally; confirm the private
+  harness has no per-call timeout that this could trip.
 
-### 7. Deliverables — none started, none droppable
-README / Devpost / video script / `architecture.md`, then record and upload the video and
-flip the repo public. An unshipped video or a private repo is a failed submission
-regardless of score.
+### 5. Deliverables — none started, none droppable
+README / Devpost / video script / `architecture.md`, then record and upload the video and flip
+the repo public. An unshipped video or a private repo is a failed submission regardless of
+score. **The Pillar III trace now has real decisions to show** — `intent_override` erasure and
+`skip_rerank` both emit trace records with the signal that triggered them.
 
 ## Known risks
-- **The cascade may simply lose.** It is on right now and unproven. Measure, then decide.
-- **Runtime.** Pure BM25 already takes 2m15s for 200 sessions. The first cascade smoke test
-  ran at 25s/session, which would be ~84 min for a full run — unusable for iteration. The
-  fp32 and `CE_WIDTH` fixes target this but are unverified.
+- **The headline gain is unproven.** +0.0165 over the lexical floor, paired 95% CI
+  [-0.014, +0.047], 3/5 folds improving. The single real effect is on `buying`. If the
+  private result disappoints, `TECHJAM_CE_WIDTH=0` returns to the 0.76125 floor in one
+  env var, and that floor is itself solid (it reproduces exactly, and survives `models/`
+  being deleted).
+- **Boundary regresses -0.060** and is deliberately not special-cased (n=10).
+- **Runtime.** 22s per 200 sessions lexical-only, 108s with the cross-encoder. Comfortable
+  locally, but the private harness may impose a per-call timeout the CE could trip; the
+  fallback ladder degrades silently rather than failing, which is the right shape.
 - **Private-set fragility.** `competition_specification.md:40` reserves the right to add
-  "natural-language paraphrasing". The current score leans on constraints being verbatim
-  substrings of the target product. The dense track is the hedge — now built, not yet proven.
-- **`intent_override` still drags stale slots** across all 30 of those sessions.
+  "natural-language paraphrasing". The score still leans on constraints being verbatim
+  substrings of the target product. The dense track is the intended hedge — built, and
+  currently a measured -0.0645 regression, so the hedge is not yet available.
+- **The dense track is off.** Pillar I's browsing track exists and is unused at inference.
+  It is demonstrable in the trace and the demo, but "hybrid retrieval" is currently one
+  live track plus a reranker, and the writeup must say so honestly.

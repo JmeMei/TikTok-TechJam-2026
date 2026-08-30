@@ -227,3 +227,86 @@ class CacheKeying(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverrideErasure(unittest.TestCase):
+    """Pillar II: contradictions erase and rewrite slots, they do not append.
+
+    intent_override is 30 of 200 public sessions, and a hit cannot score before the
+    override turn (local_evaluator.py:234, 252). Dragging the retracted preference into
+    the ranker's query cost -0.164 on that scenario before this landed.
+    """
+
+    def test_override_erases_the_retracted_opening_constraint(self) -> None:
+        state = SessionState("o1", {})
+        state.observe("I'm looking for Dresses. color: pink.", 1)
+        self.assertIn("color: pink", state.distilled().as_query())
+        state.observe("Actually, ignore my earlier preference. What I need is: cotton.", 2)
+        query = state.distilled().as_query()
+        self.assertTrue(state.override_seen)
+        self.assertIn("color: pink", state.erased)
+        self.assertNotIn("pink", query, "retracted preference still reaching the ranker")
+        self.assertIn("cotton", query)
+
+    def test_override_keeps_the_coarse_category(self) -> None:
+        """An override changes what they want, not which department they are shopping in."""
+        state = SessionState("o2", {})
+        state.observe("I'm looking for Dresses. color: pink.", 1)
+        state.observe("Actually, ignore my earlier preference. What I need is: cotton.", 2)
+        self.assertIn("Dresses", state.distilled().as_query())
+
+    def test_override_constraint_leads_the_query(self) -> None:
+        state = SessionState("o3", {})
+        state.observe("I'm looking for Dresses. color: pink.", 1)
+        state.observe("For that, what matters is: 100% polyester.", 2)
+        state.observe("Actually, ignore my earlier preference. What I need is: cotton.", 3)
+        self.assertTrue(state.distilled().as_query().startswith("cotton"))
+
+    def test_erasure_does_not_touch_the_lexical_track(self) -> None:
+        """Deliberate: the retracted value is a genuine attribute of the target product,
+        so removing its terms from BM25 risks recall. Demote in ranking only."""
+        state = SessionState("o4", {})
+        state.observe("I'm looking for Dresses. color: pink.", 1)
+        state.observe("Actually, ignore my earlier preference. What I need is: cotton.", 2)
+        self.assertIn("pink", state.query_terms())
+
+    def test_non_override_sessions_are_unaffected(self) -> None:
+        for opening in (
+            "I'm looking for Dresses. A key requirement is: 100% cotton.",
+            "I'm looking for Dresses, but I'm still exploring.",
+        ):
+            with self.subTest(opening=opening):
+                state = SessionState("o5", {})
+                state.observe(opening, 1)
+                self.assertFalse(state.override_seen)
+                self.assertEqual(state.erased, [])
+                self.assertIn("Dresses", state.distilled().as_query())
+
+
+class RefusalHandling(unittest.TestCase):
+    """A refusal reveals nothing, so it must not reach the ranker as content."""
+
+    def test_boundary_refusal_does_not_enter_the_query(self) -> None:
+        # The bare article "a" was missing from BOILERPLATE, so this whole sentence
+        # survived and was ranked against as if it were a disclosed constraint.
+        state = SessionState("r1", {})
+        state.observe("I'm looking for Dresses, but I'm still exploring.", 1)
+        state.observe("I don't have a preference for color; please use your judgment.", 2)
+        self.assertEqual(state.distilled().as_query(), "Dresses")
+        self.assertIn("color", state.unavailable)
+
+    def test_drained_refusal_does_not_inject_the_attribute_name(self) -> None:
+        state = SessionState("r2", {})
+        state.observe("I'm looking for Dresses. A key requirement is: 100% cotton.", 1)
+        state.observe("I don't have an additional preference for other.", 2)
+        self.assertNotIn("other", state.distilled().as_query().split(" | "))
+        self.assertIn("other", state.drained)
+
+    def test_drained_other_marks_the_session_exhausted(self) -> None:
+        """"other" matches ANY undisclosed constraint, so its refusal proves the pool
+        is empty and no narrower question can pay."""
+        state = SessionState("r3", {})
+        state.observe("I'm looking for Dresses.", 1)
+        self.assertFalse(state.exhausted())
+        state.observe("I don't have an additional preference for other.", 2)
+        self.assertTrue(state.exhausted())
