@@ -50,6 +50,19 @@ class Slot:
     weight: float = 1.0
 
 
+# Fixed boilerplate the simulator wraps around real content. Stripping it is the whole
+# point of distillation: "For that, what matters is:" carries no preference information
+# but does occupy ranker context and dilute the relevance signal.
+BOILERPLATE = re.compile(
+    r"i'm looking for|a key requirement is:?|for that,? what matters is:?"
+    r"|but i'm still exploring|those options are not quite right yet"
+    r"|ask me about one specific attribute|actually,? ignore my earlier preference"
+    r"|what i need is:?|i don't have (?:an additional )?preference(?: for)?"
+    r"|please use your judgment",
+    re.I,
+)
+
+
 @dataclass
 class DistilledContext:
     """Compact structured profile handed to rankers. Never raw history."""
@@ -57,16 +70,26 @@ class DistilledContext:
     slots: dict[str, list[str]] = field(default_factory=dict)
     profile_tags: list[str] = field(default_factory=list)
     category_hint: str = ""
+    disclosures: list[str] = field(default_factory=list)
 
     def as_query(self) -> str:
-        """One-line natural rendering, for cross-encoder and LLM prompts."""
+        """One-line natural rendering, for cross-encoder and LLM prompts.
+
+        Must carry everything the customer has revealed. Retrieval searches on the whole
+        accumulated transcript, so a ranker given only the opening message is reranking
+        with strictly less information than the retriever used -- it will reliably undo
+        good candidates rather than improve them.
+        """
         parts: list[str] = []
         if self.category_hint:
             parts.append(self.category_hint)
         for bucket, values in self.slots.items():
             if values:
                 parts.append(f"{bucket}: {', '.join(values)}")
-        return " | ".join(parts)
+        # Until Stage 5 parses typed slots, the boilerplate-stripped disclosures are the
+        # distillation. Deduplicated and compacted -- not a transcript replay.
+        parts.extend(self.disclosures)
+        return " | ".join(p for p in parts if p)[:600]
 
 
 class SessionState:
@@ -135,11 +158,27 @@ class SessionState:
             slots=slots,
             profile_tags=[str(t) for t in tags if t],
             category_hint=self.category_hint(),
+            disclosures=self.disclosures(),
         )
+
+    def disclosures(self) -> list[str]:
+        """Boilerplate-stripped, deduplicated content from every turn after the opening."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for message in self.transcript[1:]:
+            cleaned = BOILERPLATE.sub(" ", message)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;,")
+            if cleaned and cleaned.lower() not in seen:
+                seen.add(cleaned.lower())
+                out.append(cleaned)
+        return out
 
     def category_hint(self) -> str:
         """The opening message names the coarse category; it is the most stable signal."""
-        return self.transcript[0] if self.transcript else ""
+        if not self.transcript:
+            return ""
+        cleaned = BOILERPLATE.sub(" ", self.transcript[0])
+        return re.sub(r"\s+", " ", cleaned).strip(" .;,")
 
     # ---- policy interface ------------------------------------------------
 

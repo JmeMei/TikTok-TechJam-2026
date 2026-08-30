@@ -25,6 +25,9 @@ from src.llm import LLMBackend
 CROSS_ENCODER_DIR = Path("models/cross-encoder")
 
 # Funnel widths. Budgeted knob (CLAUDE.md section 9) -- k-fold before changing.
+# CE_WIDTH is how many fused candidates the cross-encoder scores. Cost is linear in it,
+# and it was the dominant term in a 25s/session smoke run at 50.
+CE_WIDTH = 25
 PREFILTER_WIDTH = 15
 
 
@@ -82,6 +85,10 @@ class CrossEncoder:
             self._model = AutoModelForSequenceClassification.from_pretrained(
                 str(self.model_dir), local_files_only=True
             )
+            # Weights are stored fp16 to fit in git, but CPU has no fast fp16 kernels --
+            # torch either upcasts per-op or takes a slow path, so running fp16 on CPU is
+            # markedly SLOWER than fp32. Upcast once at load; disk size is unaffected.
+            self._model = self._model.float()
             self._model.eval()
             self.available = True
         except Exception:
@@ -140,11 +147,15 @@ class Ranker:
         tokens = 0
 
         if query:
-            # --- rung 1: cross-encoder pre-filter, 50 -> PREFILTER_WIDTH ---
-            ce_scores = self.cross_encoder.score(query, self._documents(incoming))
-            if ce_scores and len(ce_scores) == len(incoming):
-                paired = sorted(zip(incoming, ce_scores), key=lambda p: -p[1])
-                order = [asin for asin, _ in paired]
+            # --- rung 1: cross-encoder over the head of the fused list ---
+            # Only the head is scored: cost is linear in width, and an item the fused
+            # ranking put 40th is not a plausible rank-1. The tail keeps its RRF order.
+            head_in = incoming[:CE_WIDTH]
+            tail = incoming[CE_WIDTH:]
+            ce_scores = self.cross_encoder.score(query, self._documents(head_in))
+            if ce_scores and len(ce_scores) == len(head_in):
+                paired = sorted(zip(head_in, ce_scores), key=lambda p: -p[1])
+                order = [asin for asin, _ in paired] + tail
                 stage = "cross_encoder"
                 flat = _is_flat([s for _, s in paired])
 
