@@ -32,3 +32,4 @@ models/qwen/
 
 # Trace dumps for the demo walkthrough
 traces/
+results-refactor-check.json
