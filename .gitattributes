@@ -1,1 +1,7 @@
 * text=auto eol=lf
+
+# Model weights and index artifacts are binary. Without this, git's autocrlf can
+# corrupt them on checkout on Windows -- which would silently break the offline floor.
+*.safetensors binary
+*.npy         binary
+models/**     -text
