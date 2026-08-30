@@ -17,6 +17,7 @@ HARD RULES for every stage here (competition_specification.md:65):
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,7 +28,13 @@ CROSS_ENCODER_DIR = Path("models/cross-encoder")
 # Funnel widths. Budgeted knob (CLAUDE.md section 9) -- k-fold before changing.
 # CE_WIDTH is how many fused candidates the cross-encoder scores. Cost is linear in it,
 # and it was the dominant term in a 25s/session smoke run at 50.
-CE_WIDTH = 25
+# DEFAULT OFF -- measured, see eval/RESULTS.md run 3c. On the full 200 the cross-encoder
+# is +0.041 on buying and +0.009 on browsing but -0.164 on intent_override, netting
+# -0.0077. The override loss is NOT the ranker's fault: with erasure unimplemented, the
+# stale pre-override decoy still leads the distilled query, and a cross-encoder
+# concentrates on it where BM25 dilutes it. Re-enable with TECHJAM_CE_WIDTH=25 once
+# override erasure lands -- it is then expected to be worth about +0.02.
+CE_WIDTH = int(os.environ.get("TECHJAM_CE_WIDTH", "0"))
 PREFILTER_WIDTH = 15
 
 

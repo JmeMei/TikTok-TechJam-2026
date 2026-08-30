@@ -10,6 +10,10 @@ Every eval run gets a row. Never claim an improvement that is not written here.
 | 1 | 2026-08-28 | 3b61fd3 | Accumulate transcript + always `ask_attribute="other"` | **0.75040** | 0.8750 | 0.5400 | 3.46 | 0.755 | 0.8875 | 0.8625 | 0.8667 | 0.9000 | **KEEP (+0.6437)** |
 | 1r | 2026-08-31 | (stage 1) | Refactor into `src/` — control run, self-refine off | **0.75040** | 0.8750 | 0.5400 | 3.46 | 0.755 | 0.8875 | 0.8625 | 0.8667 | 0.9000 | **IDENTICAL** — refactor verified clean |
 | 2 | 2026-08-31 | (stage 1) | + self-refining guidance (stop asking after 2 empty asks) | **0.76035** | 0.8900 | 0.5452 | 3.41 | 0.759 | — | — | — | — | **KEEP (+0.0100)** |
+| 3 | 2026-08-31 | adf486e | Dense track live (index committed) + cross-encoder | **0.69931** | 0.8050 | 0.5310 | 4.13 | 0.688 | 0.7875 | 0.8125 | 0.7667 | 1.0000 | **REVERT (-0.0610)** |
+| 3a | 2026-08-31 | adf486e | Control: dense live, CE off (`TECHJAM_CE_WIDTH=0`) | **0.69589** | 0.8100 | 0.5073 | 4.07 | 0.694 | 0.7750 | 0.8375 | 0.8000 | 0.9000 | isolates dense |
+| 3b | 2026-08-31 | adf486e | Control: dense off + CE off — **reproduces run 2 exactly** | **0.76035** | 0.8900 | 0.5452 | 3.41 | 0.759 | 0.9000 | 0.8875 | 0.8667 | 0.9000 | **IDENTICAL to run 2** |
+| 3c | 2026-08-31 | adf486e | Dense off, CE on — isolates the cross-encoder alone | **0.75262** | 0.8800 | 0.5311 | 3.34 | 0.767 | 0.9250 | 0.8875 | 0.7333 | 0.9000 | split verdict, see notes |
 
 ## Run 0 notes — where the losses are
 
@@ -99,3 +103,54 @@ The likely mechanism: retrieval ORs together up to 60 accumulated terms, so ever
 disclosure broadens the query and dilutes BM25 precision. If true, **query term selection is a
 real lever** and "accumulate everything" is leaving score on the table. Logged as a hypothesis
 for the retrieval stages, not kept — a result that arrives via a bug is not a result.
+
+## Run 3 notes — the dense track is the regression, not the cross-encoder
+
+The cascade was switched on and unmeasured (`PROGRESS.md`). A 20-session smoke test said it
+gained **+0.0196**. The full 200 reversed the sign. **n=20 is not a measurement** — the
+scenario mix at n=20 gives intent_override only 4 sessions, and that is exactly the
+scenario that decides this question.
+
+Four full 200-session runs, isolating one variable at a time:
+
+| config | TS | HR@10 | MRR | wall |
+|---|---|---|---|---|
+| BM25 only (= run 2) | **0.76035** | 0.8900 | 0.5452 | 22s |
+| + dense/RRF | 0.69589 | 0.8100 | 0.5073 | 64s |
+| + dense/RRF + cross-encoder | 0.69931 | 0.8050 | 0.5310 | 166s |
+| + cross-encoder only | 0.75262 | 0.8800 | 0.5311 | 121s |
+
+**The dense track costs -0.0645 on its own.** It was never measured: at run 2 the index did
+not exist, so `DenseIndex.available` was False, `rrf_fuse` was skipped, and the pipeline was
+pure BM25. Committing `data/index/` in `adf486e` switched the dense track on as a silent side
+effect of shipping a build artifact. RRF fusion with a weak dense ranking pushes targets out
+of the top 25, which costs HR@10 directly (0.890 -> 0.810) — and HR@10 carries weight 0.50.
+
+**The cross-encoder's verdict is split, and the split is diagnostic:**
+
+| scenario | n | BM25 only | + cross-encoder | delta |
+|---|---|---|---|---|
+| buying | 80 | 0.7616 | **0.8025** | **+0.041** |
+| browsing | 80 | 0.7522 | **0.7615** | **+0.009** |
+| intent_override | 30 | 0.7605 | 0.5964 | **-0.164** |
+| boundary | 10 | 0.8150 | 0.7509 | -0.064 (n=10, noise) |
+
+It helps 160 of 200 sessions and collapses on the 30 override ones. **The cause is the
+unimplemented override erasure, not the ranker.** After an override the distilled query is:
+
+```
+'Dresses. color: pink | 100% polyester | cotton'
+```
+
+`color: pink` is the stale pre-override decoy, still leading the query; `cotton` is the real
+post-override hard constraint, buried last at equal weight. BM25 survives this because it
+dilutes the decoy across dozens of OR'd terms. A cross-encoder concentrates on it and ranks
+the wrong intent. `state.override_seen` is never set and `state.erased` is always empty.
+
+**Consequence: implement override erasure BEFORE judging the cross-encoder.** If the 30
+override sessions merely return to their BM25-only 0.7605, the aggregate becomes ~0.780 —
+about **+0.020** over the current best. The cross-encoder is not a failed idea; it is being
+fed a poisoned query on 15% of sessions.
+
+**Shipping state until then:** dense track and cross-encoder both OFF. Best is run 2's
+0.76035, reproduced exactly as run 3b — which also re-verifies the pipeline end to end.

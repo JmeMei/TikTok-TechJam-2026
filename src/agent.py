@@ -14,6 +14,7 @@ competition_specification.md:65 warns the official harness may count them as a f
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from src import policy, router
@@ -24,6 +25,21 @@ from src.state import SessionState
 from src.trace import TurnTrace
 
 CATALOG_DEFAULT = "data/catalog.jsonl"
+
+
+def dense_enabled() -> bool:
+    """DEFAULT OFF -- measured, see eval/RESULTS.md run 3/3a/3b.
+
+    Committing `data/index/` flipped `DenseIndex.available` to True and switched the dense
+    track on as a silent side effect of shipping a build artifact. It had never been
+    measured. RRF fusion against the weak dense ranking pushes targets out of the top 25
+    and costs HR@10 directly: 0.890 -> 0.810, TechnicalScore 0.76035 -> 0.69589.
+
+    The track stays built and one env var away (TECHJAM_DENSE=1) -- it is the hedge if the
+    private set paraphrases constraints instead of quoting them verbatim, and the code is
+    Pillar I's browsing track. But it does not ship on until it beats BM25 on the full 200.
+    """
+    return os.environ.get("TECHJAM_DENSE", "").strip() not in ("", "0", "false")
 
 
 def _doc_line(meta: dict) -> str:
@@ -122,13 +138,19 @@ class Agent:
             weights.append(plan.bm25_weight)
         trace.pool_sizes["bm25"] = len(lexical)
 
-        if self.dense.available and plan.dense_weight > 0:
+        if dense_enabled() and self.dense.available and plan.dense_weight > 0:
             with trace.timed("dense"):
                 dense_hits = self.dense.search(
                     orchestrator.distill(state),
                     limit=plan.truncation,
                     mmr=(route.name == router.BROWSING),
                 )
+            # The dense index is a prebuilt artifact with its own ids.json; it is NOT
+            # guaranteed to have been built against the catalog we were constructed with.
+            # An id the catalog does not contain is stripped by the scorer, so emitting
+            # one silently wastes a ranking slot (CLAUDE.md section 4). Validate at the
+            # boundary -- this is the only place a foreign id can enter the pipeline.
+            dense_hits = [(asin, score) for asin, score in dense_hits if asin in self.bm25.meta]
             if dense_hits:
                 rankings.append([asin for asin, _ in dense_hits])
                 weights.append(plan.dense_weight)

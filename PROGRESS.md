@@ -13,9 +13,23 @@ Baseline was 0.10671; the pre-existing 12-line version was 0.75040.
 ### Stage 0 — Environment unblocked ✅
 - Branch `feat/hybrid-retrieval` off `main`.
 - `data/catalog.jsonl` restored, **SHA-256 verified** against `SHA256SUMS`, 50,000 rows.
-- `.venv` on Anaconda CPython **3.13.9**. The `python` on PATH is MSYS2/mingw64, whose ABI
-  cannot install torch wheels — the venv is built from `C:\Users\Tharun\anaconda3\python.exe`
-  instead. **Use `.venv\Scripts\python.exe`, not bare `python`.**
+  It is gitignored (60MB), so **a fresh clone has no catalog** — re-fetch and verify:
+  ```bash
+  curl.exe -sL -o catalog.jsonl.gz "https://github.com/TechJam2026/techjam-conversational-search/releases/download/participant-kit/catalog.jsonl.gz"
+  sha256sum catalog.jsonl.gz          # must match SHA256SUMS
+  gzip -dc catalog.jsonl.gz > data/catalog.jsonl
+  ```
+- `.venv` on CPython **3.13**. The `python` on PATH is a shim (MSYS2/mingw64 on one box, the
+  Windows Store alias on another) and cannot install torch wheels — build the venv from a
+  real python.org or Anaconda interpreter. **Use `.venv/Scripts/python.exe`, never bare
+  `python`**; bare `python` opens a REPL and will hang a non-interactive shell.
+  ```bash
+  "$LOCALAPPDATA/Programs/Python/Python313/python.exe" -m venv .venv
+  ./.venv/Scripts/python.exe -m pip install -r requirements-dev.txt \
+      --extra-index-url https://download.pytorch.org/whl/cpu
+  ```
+  Verified on this machine 31 Aug: torch 2.13.0+cpu / transformers 4.57.6 / numpy 2.5.2,
+  25/25 tests passing, 0.76035 reproduced.
 - `requirements.txt` (numpy, torch CPU, transformers) + `requirements-dev.txt` (flask).
   Installed: torch 2.13.0+cpu, transformers 4.57.6, numpy 2.5.2, flask 3.1.3.
 - `Makefile` added — the targets `CLAUDE.md` §7 documented but which never existed.
@@ -89,83 +103,102 @@ tier lower (cross-encoder as final ranker) until it is present.
 
 ---
 
-## The open problem — cross-encoder is currently a regression
+## RESOLVED — the cascade was measured. The dense track was the regression.
 
-First smoke test (20 sessions) with the cross-encoder live:
+`PROGRESS.md` previously blamed the cross-encoder on the strength of a 20-session smoke
+test. **That smoke test was wrong in sign.** At n=20 the intent_override scenario gets only
+4 sessions, and it is the scenario that decides this question. Four full 200-session runs,
+one variable at a time (`eval/RESULTS.md` runs 3-3c):
 
-| | baseline | with cross-encoder |
-|---|---|---|
-| TechnicalScore | ~0.76 | **0.32464** |
-| HR@10 | ~0.89 | **0.4500** |
-| speed | ~1 s/session | **25 s/session** |
+| config | TS | HR@10 | MRR | wall |
+|---|---|---|---|---|
+| BM25 only (= run 2) | **0.76035** | 0.8900 | 0.5452 | 22s |
+| + dense/RRF | 0.69589 | 0.8100 | 0.5073 | 64s |
+| + dense/RRF + cross-encoder | 0.69931 | 0.8050 | 0.5310 | 166s |
+| + cross-encoder only | 0.75262 | 0.8800 | 0.5311 | 121s |
 
-Two causes were identified and **fixes are written but not yet measured**:
+**1. The dense track cost -0.0645 and had never been measured.** At run 2 the index did not
+exist, so `DenseIndex.available` was False and the pipeline was pure BM25. Committing
+`data/index/` in `adf486e` switched the dense track on as a *silent side effect of shipping
+a build artifact*. Now default-off behind `TECHJAM_DENSE=1`.
 
-1. **The ranker was scoring on less information than the retriever used.** BM25 retrieves
-   over the whole accumulated transcript, but `distilled().as_query()` returned only the
-   opening message, because typed slots are not populated until Stage 5. So the reranker
-   was systematically undoing good candidates. Fixed by making distillation real now:
-   boilerplate-stripped, deduplicated disclosures from every turn (`BOILERPLATE` regex in
-   `state.py`) rather than an empty struct.
-2. **fp16 on CPU is slower than fp32.** Weights are stored fp16 to fit in git, but torch
-   has no fast CPU fp16 kernels and takes a slow path. Now upcast once at load.
-   Also capped the cross-encoder to the top `CE_WIDTH=25` fused candidates instead of all
-   50 — cost is linear in width and the tail keeps its RRF order.
+**2. The speed problem is fixed.** The fp32 upcast and `CE_WIDTH=25` took the cross-encoder
+from 25s/session to ~0.6s/session. A full 200-session run is 22s without it, 121s with it.
+Iteration is no longer gated on runtime.
 
-**⚠️ The fixes are committed but STILL UNMEASURED.** Work was stopped before the re-run.
-This is the single most important open question in the repo: **the ranking cascade is
-currently switched on and has never been shown to help.** If it still loses it must ship
-off by default with the negative result documented.
+**3. The cross-encoder is not a failed idea — it is being fed a poisoned query.**
+
+| scenario | n | BM25 only | + cross-encoder | delta |
+|---|---|---|---|---|
+| buying | 80 | 0.7616 | **0.8025** | **+0.041** |
+| browsing | 80 | 0.7522 | **0.7615** | **+0.009** |
+| intent_override | 30 | 0.7605 | 0.5964 | **-0.164** |
+| boundary | 10 | 0.8150 | 0.7509 | -0.064 (n=10, noise) |
+
+It helps 160 of 200 sessions. It collapses on the 30 override ones because override erasure
+is unimplemented. Verified directly — after an override the distilled query is:
+
+```
+'Dresses. color: pink | 100% polyester | cotton'
+```
+
+`color: pink` is the stale pre-override decoy still *leading* the query; `cotton`, the real
+post-override hard constraint, is last at equal weight. BM25 survives this by diluting the
+decoy across dozens of OR'd terms; a cross-encoder concentrates on it. `state.override_seen`
+is never set; `state.erased` is always empty.
+
+**Shipping state: dense OFF, cross-encoder OFF, verified back at 0.76035 with the index
+present on disk.** Both are one env var from returning.
 
 ---
 
 ## Remaining work, in priority order
 
-### 1. Measure the cascade — do this first, before writing any new code
-```bash
-.venv/Scripts/python.exe -m eval.run_eval --limit 20 --output results-smoke.json
-```
-Compare against the 0.76035 baseline. Three possible outcomes:
-- **Wins** → run the full 200 and record in `eval/RESULTS.md`.
-- **Loses** → set `CE_WIDTH=0` / disable the cross-encoder rung, keep the code, document it.
-- **Too slow** (>10 min for 200 sessions) → narrow `CE_WIDTH` further or gate the cascade
-  behind the over-generality signal so it fires on a minority of turns.
+### 1. Override erasure (Pillar II) — now the highest-value item, and it unlocks #2
+`src/state.py`. Detect `"Actually, ignore my earlier preference. What I need is: X."`,
+set `override_seen`, move the opening decoy into `erased`, and rebuild `category_hint()` so
+the stale value stops leading the distilled query. Keep the coarse category — that part of
+the opening is still true.
 
-Nothing else should be built until this number exists. **No claim of improvement is valid
-without it** (`CLAUDE.md` §8).
+One caveat worth knowing before writing it: the override `old_value` is
+`soft_preferences[-1]`, which is a *genuine* attribute of the target product, not a false
+one. So this is a **re-weighting problem, not a contradiction** — dropping it from the
+ranker's query is right, but purging its terms from BM25 retrieval may cost recall. Erase
+from the distilled/rerank query first, measure, and only then consider BM25.
 
-### 2. Pillar II — the biggest untouched pillar *(blocked on nothing)*
-`src/state.py` has the fields but the logic is stubs. Needed:
-- **Slot parsing** mirroring `classify_constraint()` (`local_evaluator.py:137-151`) exactly.
-  It is a pure function, so a mirror is correct by construction.
-- **Intent-override erasure.** All **30 `intent_override` sessions** currently drag the
-  stale preference into every subsequent query. Detect
-  `"Actually, ignore my earlier preference…"` and **erase**, don't append.
-- **Slot decay**, and the `drained` / `unavailable` bookkeeping from the two other fixed
-  reply shapes.
-- **Over-generality cutoff** — `policy.decide_ask` has the hook; the thresholds are untuned.
+### 2. Re-enable the cross-encoder and re-measure — expected ~+0.02
+`TECHJAM_CE_WIDTH=25`. If the 30 override sessions merely return to their BM25-only 0.7605
+while buying and browsing keep their gains, the aggregate is ~0.780. This is the single
+largest measured opportunity in the repo and it is gated only on #1.
 
-### 3. Pillar III — `user_profile` is ignored entirely *(blocked on nothing)*
-`reset()` receives `preference_tags`, `average_prior_rating`, `summary` and none of it is
-used. Fold in as a **weak prior** that never overrides a disclosed constraint.
+### 3. Diagnose the dense track before re-enabling it
+It is Pillar I's browsing track and the hedge against a paraphrasing private set, so it
+should not stay off permanently. Likely suspects, cheapest first: RRF weights treating a
+weak ranking as an equal vote; the encoder seeing `as_query()` output it was not trained
+for; `truncation=50` being too shallow for fusion to recover. Measure per-track HR@10
+alone (dense-only, no fusion) to find out whether the ranking or the fusion is at fault.
 
-### 4. LLM semantic ranking *(blocked on the Qwen download)*
-`src/llm.py` is written — pointwise logprob scoring, wall-clock budget, degrades to None.
-Untested against real weights. This is Pillar I's explicitly named stage.
+### 4. Pillar II proper — slot parsing, decay, drained/unavailable bookkeeping
+`classify_constraint()` (`local_evaluator.py:137-151`) is pure, so mirroring it is correct
+by construction. Note `drained` is currently never populated, so `exhausted()` is always
+False and `_select` always returns `"other"`. The `"other"` wildcard is genuinely optimal
+(it matches any undisclosed constraint), so expect little metric movement here — but it is
+required pillar behaviour and the trace needs it for the demo.
 
-### 5. Validation
-- **k-fold the +0.00995 self-refinement gain** — it sits exactly at the n=200 noise floor.
-- k-fold every tuned knob before trusting it (`make eval-fold N=5`).
+### 5. Pillar III — `user_profile` is still ignored entirely
+`reset()` receives `preference_tags`, `average_prior_rating`, `summary`; none is used. Fold
+in as a weak prior that never overrides a disclosed constraint.
+
+### 6. Validation
+- k-fold the +0.00995 self-refinement gain — still at the n=200 noise floor, still untrusted.
 - Verify the Flask demo end-to-end (`make demo`) — written, never run.
-- Offline check: `HF_HUB_OFFLINE=1` must produce an identical score.
-- Degradation check: rename `models/` → must fall back to BM25 near 0.75, not crash.
+- `HF_HUB_OFFLINE=1` must produce an identical score.
+- Rename `models/` -> must fall back to BM25 near 0.76, not crash.
 
-### 6. Deliverables — none started, none droppable
-README / Devpost / video script / `architecture.md`, then record + upload the video
-(public, linked in Devpost) and flip the repo public. An unshipped video or a private repo
-is a failed submission regardless of score.
-
----
+### 7. Deliverables — none started, none droppable
+README / Devpost / video script / `architecture.md`, then record and upload the video and
+flip the repo public. An unshipped video or a private repo is a failed submission
+regardless of score.
 
 ## Known risks
 - **The cascade may simply lose.** It is on right now and unproven. Measure, then decide.
