@@ -1,0 +1,13 @@
+# Runtime dependencies for the scored agent.
+# Python 3.13.9 (CPython/MSC, 64-bit) produced the reported scores.
+# Python >=3.10 is expected to work; the agent itself uses no version-specific syntax.
+#
+# CPU-only torch. Install with:
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# Everything here runs in-process and in-memory. No vector DB server, no API client,
+# no network access at inference time.
+
+numpy>=1.26,<3
+torch>=2.2,<3
+transformers>=4.40,<5

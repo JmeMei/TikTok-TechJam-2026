@@ -19,3 +19,16 @@ tests/test_organizer_pipeline.py
 
 # Release archive - re-downloadable, never commit (19MB)
 catalog.jsonl.gz
+
+# --- our additions ---
+.venv/
+venv/
+results-fast.json
+results_v*.json
+
+# Ranking LLM weights (~1-3GB): fetched by scripts/fetch_llm.py at setup time.
+# The two encoders under models/ ARE committed - they are the offline floor.
+models/qwen/
+
+# Trace dumps for the demo walkthrough
+traces/

@@ -1,0 +1,9 @@
+# Development-only dependencies. NOT required to run or score the agent.
+#
+# The Flask demo in app/ exists to demonstrate the backend for the submission video.
+# src/ never imports anything from here -- verified by `make check`.
+
+-r requirements.txt
+
+flask>=3.0,<4
+huggingface-hub>=0.23      # model download at setup time only
