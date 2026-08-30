@@ -65,18 +65,27 @@ imports flask. `scripts/dump_trace.py` writes the same trace schema for static a
 
 ---
 
-## In flight
+### Dense index ✅ built
+`data/index/emb.f16.npy` — **(50000, 384) fp16, 38.4MB** — plus `ids.json`. Committed, so
+a fresh clone gets the dense track without rebuilding (the build took ~35 min on CPU).
+`DenseIndex.available` is now True, so the browsing track with MMR diversity is live.
 
-**Dense index build** — `scripts/build_index.py` running in background, ~20+ min elapsed
-encoding 50k products on CPU. Writes `data/index/emb.f16.npy` (~37MB) + `ids.json`.
-Until it lands, `DenseIndex.available` is False and the dense track is skipped — by design.
+### Type scale fixed ✅
+The Flask template had 8 font sizes between 10px and 15px — 0.5px steps are noise, not
+hierarchy. Collapsed to three tokens (`--fs-micro:11px` / `--fs-body:14px` /
+`--fs-lead:18px`, ~1.28 ratio); everything else separates by weight, colour or case.
+
+---
+
+## Paused
 
 **Qwen download — PAUSED at 191MB of ~988MB.** Resume with:
 ```bash
 .venv/Scripts/python.exe scripts/fetch_llm.py --model Qwen/Qwen2.5-0.5B-Instruct
 ```
-HF resumes from the partial blob; nothing is lost. The link is slow (~80MB/5min), so this
-is roughly an hour of wall clock. Nothing else is blocked on it.
+HF resumes from the partial blob; nothing is lost. The link runs ~80MB/5min, so budget
+about an hour of wall clock. Nothing else is blocked on it — the cascade simply runs one
+tier lower (cross-encoder as final ranker) until it is present.
 
 ---
 
@@ -103,32 +112,67 @@ Two causes were identified and **fixes are written but not yet measured**:
    Also capped the cross-encoder to the top `CE_WIDTH=25` fused candidates instead of all
    50 — cost is linear in width and the tail keeps its RRF order.
 
-**Next action: re-run the 20-session smoke test.** If the cross-encoder still loses, it
-ships off by default and the negative result gets written up — that is a better Technical
-Execution story than an unmeasured feature left switched on.
+**⚠️ The fixes are committed but STILL UNMEASURED.** Work was stopped before the re-run.
+This is the single most important open question in the repo: **the ranking cascade is
+currently switched on and has never been shown to help.** If it still loses it must ship
+off by default with the negative result documented.
 
 ---
 
-## Remaining
+## Remaining work, in priority order
 
-| | Stage | Blocked on |
-|---|---|---|
-| ☐ | Re-measure cross-encoder after the two fixes | nothing |
-| ☐ | Dense track + RRF end-to-end measurement | index build |
-| ☐ | LLM semantic ranking (Pillar I's named stage) | Qwen download |
-| ☐ | **Pillar II proper** — slot parsing mirroring `classify_constraint()`, intent-override **erasure**, slot decay, over-generality cutoff | nothing — highest-value remaining work |
-| ☐ | **Pillar III proper** — `user_profile` as a weak prior (currently ignored entirely) | nothing |
-| ☐ | k-fold the self-refinement gain and every tuned knob | nothing |
-| ☐ | Verify Flask demo end-to-end | index build |
-| ☐ | README / Devpost / video script / architecture.md | code settling |
-| ☐ | Record + upload video, flip repo public | everything |
+### 1. Measure the cascade — do this first, before writing any new code
+```bash
+.venv/Scripts/python.exe -m eval.run_eval --limit 20 --output results-smoke.json
+```
+Compare against the 0.76035 baseline. Three possible outcomes:
+- **Wins** → run the full 200 and record in `eval/RESULTS.md`.
+- **Loses** → set `CE_WIDTH=0` / disable the cross-encoder rung, keep the code, document it.
+- **Too slow** (>10 min for 200 sessions) → narrow `CE_WIDTH` further or gate the cascade
+  behind the over-generality signal so it fires on a minority of turns.
 
-### Known risks
-- **Cross-encoder may simply lose.** Measure, then decide; do not keep it on faith.
-- **Runtime.** Baseline is already 2m15s for 200 sessions on pure BM25. Adding ranking
-  stages could push a full run past 30 minutes, which throttles iteration.
+Nothing else should be built until this number exists. **No claim of improvement is valid
+without it** (`CLAUDE.md` §8).
+
+### 2. Pillar II — the biggest untouched pillar *(blocked on nothing)*
+`src/state.py` has the fields but the logic is stubs. Needed:
+- **Slot parsing** mirroring `classify_constraint()` (`local_evaluator.py:137-151`) exactly.
+  It is a pure function, so a mirror is correct by construction.
+- **Intent-override erasure.** All **30 `intent_override` sessions** currently drag the
+  stale preference into every subsequent query. Detect
+  `"Actually, ignore my earlier preference…"` and **erase**, don't append.
+- **Slot decay**, and the `drained` / `unavailable` bookkeeping from the two other fixed
+  reply shapes.
+- **Over-generality cutoff** — `policy.decide_ask` has the hook; the thresholds are untuned.
+
+### 3. Pillar III — `user_profile` is ignored entirely *(blocked on nothing)*
+`reset()` receives `preference_tags`, `average_prior_rating`, `summary` and none of it is
+used. Fold in as a **weak prior** that never overrides a disclosed constraint.
+
+### 4. LLM semantic ranking *(blocked on the Qwen download)*
+`src/llm.py` is written — pointwise logprob scoring, wall-clock budget, degrades to None.
+Untested against real weights. This is Pillar I's explicitly named stage.
+
+### 5. Validation
+- **k-fold the +0.00995 self-refinement gain** — it sits exactly at the n=200 noise floor.
+- k-fold every tuned knob before trusting it (`make eval-fold N=5`).
+- Verify the Flask demo end-to-end (`make demo`) — written, never run.
+- Offline check: `HF_HUB_OFFLINE=1` must produce an identical score.
+- Degradation check: rename `models/` → must fall back to BM25 near 0.75, not crash.
+
+### 6. Deliverables — none started, none droppable
+README / Devpost / video script / `architecture.md`, then record + upload the video
+(public, linked in Devpost) and flip the repo public. An unshipped video or a private repo
+is a failed submission regardless of score.
+
+---
+
+## Known risks
+- **The cascade may simply lose.** It is on right now and unproven. Measure, then decide.
+- **Runtime.** Pure BM25 already takes 2m15s for 200 sessions. The first cascade smoke test
+  ran at 25s/session, which would be ~84 min for a full run — unusable for iteration. The
+  fp32 and `CE_WIDTH` fixes target this but are unverified.
 - **Private-set fragility.** `competition_specification.md:40` reserves the right to add
-  "natural-language paraphrasing" to the simulator. Current score leans on constraints
-  being verbatim substrings of the target product. The dense track is the hedge.
-- **`intent_override` still drags stale slots** — 30 sessions carry the erased preference
-  into every query. Pillar II work fixes this.
+  "natural-language paraphrasing". The current score leans on constraints being verbatim
+  substrings of the target product. The dense track is the hedge — now built, not yet proven.
+- **`intent_override` still drags stale slots** across all 30 of those sessions.
