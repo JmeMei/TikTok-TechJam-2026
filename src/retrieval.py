@@ -114,12 +114,15 @@ class DenseIndex:
     skips the dense track. That is the first rung of the fallback ladder.
     """
 
+    ENCODER_DIR = Path("models/bi-encoder")
+
     def __init__(self, index_dir: str | Path = "data/index") -> None:
         self.index_dir = Path(index_dir)
         self.available = False
         self.ids: list[str] = []
         self._matrix = None
-        self._encoder = None
+        self._tokenizer = None
+        self._model = None
         self._load()
 
     def _load(self) -> None:
@@ -129,12 +132,36 @@ class DenseIndex:
             return
         try:
             import numpy as np
+            from transformers import AutoModel, AutoTokenizer
 
-            self._matrix = np.load(matrix_path)
+            self._matrix = np.load(matrix_path).astype("float32")
             self.ids = json.loads(ids_path.read_text(encoding="utf-8"))
-            self.available = len(self.ids) == self._matrix.shape[0]
+            if len(self.ids) != self._matrix.shape[0]:
+                return
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                str(self.ENCODER_DIR), local_files_only=True
+            )
+            self._model = AutoModel.from_pretrained(
+                str(self.ENCODER_DIR), local_files_only=True
+            ).float()
+            self._model.eval()
+            self.available = True
         except Exception:
+            # Absent or broken index is not an error -- the caller skips the dense track.
             self.available = False
+
+    def _encode(self, text: str):
+        import torch
+
+        batch = self._tokenizer(
+            [text], padding=True, truncation=True, max_length=192, return_tensors="pt"
+        )
+        with torch.no_grad():
+            output = self._model(**batch).last_hidden_state
+            mask = batch["attention_mask"].unsqueeze(-1).float()
+            pooled = (output * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+            pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+        return pooled.cpu().numpy().astype("float32")[0]
 
     def search(
         self,
@@ -142,10 +169,59 @@ class DenseIndex:
         limit: int = 50,
         mmr: bool = False,
     ) -> list[tuple[str, float]]:
-        """Cosine top-k. `mmr=True` applies diversity for the browsing track (Stage 3)."""
+        """Cosine top-k over the in-memory matrix.
+
+        `mmr=True` applies Maximal Marginal Relevance for the browsing track -- the brief
+        asks for "diverse dense retrieval to unlock cross-category scenario matching".
+        A browsing customer has disclosed nothing, so ten near-identical items is a bad
+        bet; spreading the list is worth more than squeezing the top score.
+        """
         if not self.available or not text:
             return []
-        return []  # implemented in Stage 3
+        try:
+            import numpy as np
+
+            query = self._encode(text)
+            # Matrix is L2-normalised at build time, so a dot product IS cosine.
+            scores = self._matrix @ query
+
+            # Over-fetch before diversifying, otherwise MMR has nothing to choose between.
+            pool = min(len(scores), limit * 4 if mmr else limit)
+            top = np.argpartition(-scores, pool - 1)[:pool]
+            top = top[np.argsort(-scores[top])]
+
+            if not mmr:
+                return [(self.ids[i], float(scores[i])) for i in top[:limit]]
+            return self._mmr(top, scores, limit)
+        except Exception:
+            return []
+
+    def _mmr(self, candidates, scores, limit: int, lambda_: float = 0.7):
+        """Greedy MMR: pick the item maximising relevance minus similarity to what's chosen.
+
+        score = lambda * relevance - (1 - lambda) * max_similarity_to_selected
+        """
+        import numpy as np
+
+        selected: list[int] = []
+        remaining = list(candidates)
+        vectors = self._matrix[candidates]
+        position = {int(idx): i for i, idx in enumerate(candidates)}
+
+        while remaining and len(selected) < limit:
+            if not selected:
+                best = remaining[0]
+            else:
+                chosen = vectors[[position[i] for i in selected]]
+                best, best_score = remaining[0], -1e9
+                for idx in remaining:
+                    similarity = float(np.max(chosen @ vectors[position[int(idx)]]))
+                    value = lambda_ * float(scores[idx]) - (1.0 - lambda_) * similarity
+                    if value > best_score:
+                        best, best_score = idx, value
+            selected.append(int(best))
+            remaining.remove(best)
+        return [(self.ids[i], float(scores[i])) for i in selected]
 
 
 def rrf_fuse(

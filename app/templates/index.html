@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shopping Copilot — pipeline walkthrough</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161a21; --line:#252b36; --ink:#e6e9ef; --dim:#8b94a7;
+    --accent:#4f9cf9; --good:#3fb950; --warn:#d29922; --bad:#f85149; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex;
+           gap:16px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; letter-spacing:.2px; }
+  .pipe { font:12px var(--mono); color:var(--dim); }
+  select, button { background:var(--panel); color:var(--ink); border:1px solid var(--line);
+                   border-radius:6px; padding:6px 10px; font-size:13px; }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; }
+  main { display:grid; grid-template-columns:minmax(320px,1fr) minmax(380px,1.1fr);
+         gap:0; height:calc(100vh - 55px); }
+  @media (max-width:900px){ main { grid-template-columns:1fr; height:auto; } }
+  .col { overflow-y:auto; padding:16px 20px; }
+  .col + .col { border-left:1px solid var(--line); }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.09em; color:var(--dim);
+       margin:0 0 12px; font-weight:600; }
+  .msg { margin-bottom:10px; padding:9px 12px; border-radius:8px; max-width:88%; }
+  .customer { background:#1c2430; border:1px solid var(--line); }
+  .agent { background:#17211a; border:1px solid #24402c; margin-left:auto; }
+  .who { font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+         margin-bottom:3px; }
+  .ask { display:inline-block; margin-top:5px; font:11px var(--mono); color:var(--accent);
+         background:#12233a; border:1px solid #1e3a5c; border-radius:4px; padding:1px 6px; }
+  .override { background:#2b1d12; border-color:#5a3a1a; color:#f0b872; }
+  .turn { border:1px solid var(--line); border-radius:8px; margin-bottom:12px; background:var(--panel); }
+  .turn > .hd { padding:7px 11px; border-bottom:1px solid var(--line); display:flex;
+                justify-content:space-between; font:11px var(--mono); color:var(--dim); }
+  .turn > .bd { padding:11px; }
+  .row { display:flex; gap:9px; padding:3px 0; font-size:12.5px; }
+  .k { color:var(--dim); min-width:104px; flex-shrink:0; font:11px var(--mono); }
+  .v { font:12px var(--mono); word-break:break-word; }
+  .stages { display:flex; gap:5px; flex-wrap:wrap; margin:2px 0 8px; }
+  .stage { font:10px var(--mono); padding:2px 7px; border-radius:10px;
+           border:1px solid var(--line); color:var(--dim); }
+  .stage.on { border-color:var(--good); color:var(--good); background:#132a19; }
+  .dec { border-left:2px solid var(--accent); padding:4px 0 4px 9px; margin:6px 0; }
+  .dec b { color:var(--accent); font:11px var(--mono); font-weight:600; }
+  .dec .why { color:var(--dim); font-size:11.5px; }
+  ol.recs { margin:5px 0 0; padding-left:24px; font-size:12px; }
+  ol.recs li { padding:1px 0; color:var(--dim); }
+  ol.recs li.hit { color:var(--good); font-weight:600; }
+  .asin { font:11px var(--mono); color:#5d6b7b; }
+  .hit-banner { background:#132a19; border:1px solid var(--good); color:var(--good);
+                padding:9px 12px; border-radius:8px; margin-bottom:12px; font-weight:600; }
+  .empty { color:var(--dim); font-style:italic; padding:20px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Shopping Copilot</h1>
+  <span class="pipe">route → dual-track retrieval → RRF → cross-encoder → LLM rank</span>
+  <span style="flex:1"></span>
+  <select id="sample">
+    <option value="">— free chat —</option>
+    {% for s in samples %}
+    <option value="{{ s.id }}">{{ s.id }} · {{ s.scenario }}</option>
+    {% endfor %}
+  </select>
+  <button id="start">Start</button>
+  <button id="step" disabled>Next turn</button>
+  <button id="run" disabled>Run to end</button>
+</header>
+
+<main>
+  <div class="col">
+    <h2>Conversation</h2>
+    <div id="hit"></div>
+    <div id="chat"><div class="empty">Pick a session and press Start.</div></div>
+    <div id="freebox" style="display:none; margin-top:12px; gap:6px;">
+      <input id="freetext" placeholder="Type as the customer…"
+             style="width:100%; padding:8px 10px; background:var(--panel); color:var(--ink);
+                    border:1px solid var(--line); border-radius:6px;">
+    </div>
+  </div>
+  <div class="col">
+    <h2>Agent internals</h2>
+    <div id="traces"><div class="empty">Per-turn strategy trace appears here.</div></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let session = null, target = null, done = false;
+
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function bubble(who, text, cls, ask) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.innerHTML = `<div class="who">${who}</div>${esc(text)}` +
+                (ask ? `<div class="ask">ask_attribute: ${esc(ask)}</div>` : "");
+  $("chat").appendChild(d);
+  d.scrollIntoView({block:"nearest"});
+}
+
+function renderTrace(t, turn, hitRank) {
+  const stages = ["bm25","dense","rrf","cross_encoder","llm"];
+  const reachedAt = stages.indexOf(t.stage_reached);
+  const el = document.createElement("div");
+  el.className = "turn";
+
+  const pools = Object.entries(t.pool_sizes || {}).map(([k,v]) => `${k}:${v}`).join("  ") || "—";
+  const decisions = (t.decisions || []).map(d =>
+     `<div class="dec"><b>${esc(d.kind)}</b> → ${esc(d.choice)}
+      <div class="why">${esc(d.trigger)}${d.detail ? " — " + esc(d.detail) : ""}</div></div>`).join("");
+  const moves = (t.rank_movement || []).slice(0,5)
+      .map(m => `${m[0].slice(0,10)} ${m[1]}→${m[2]}`).join("  ") || "none";
+  const recs = (t.products || []).map((p,i) => {
+      const isHit = p.parent_asin === target;
+      return `<li class="${isHit ? "hit" : ""}">${esc(p.title || p.parent_asin)}
+              <span class="asin">${p.parent_asin}</span>${isHit ? " ← target" : ""}</li>`;
+  }).join("");
+
+  el.innerHTML = `
+    <div class="hd"><span>turn ${turn} · route ${esc(t.route)}</span>
+      <span>${hitRank ? "HIT rank " + hitRank : ""}</span></div>
+    <div class="bd">
+      <div class="stages">${stages.map((s,i) =>
+        `<span class="stage ${i<=reachedAt?"on":""}">${s}</span>`).join("")}</div>
+      <div class="row"><span class="k">pools</span><span class="v">${esc(pools)}</span></div>
+      <div class="row"><span class="k">slots</span><span class="v">${
+        esc(JSON.stringify(t.slots || {}))}</span></div>
+      ${(t.slots_erased||[]).length ? `<div class="row"><span class="k">erased</span>
+        <span class="v" style="text-decoration:line-through;color:var(--bad)">${
+        esc(t.slots_erased.join(", "))}</span></div>` : ""}
+      <div class="row"><span class="k">ask</span><span class="v">${
+        esc(t.ask_attribute ?? "none")} — <span style="color:var(--dim)">${esc(t.ask_reason)}</span></span></div>
+      <div class="row"><span class="k">rank moves</span><span class="v">${esc(moves)}</span></div>
+      <div class="row"><span class="k">latency</span><span class="v">${
+        esc(Object.entries(t.latency_ms||{}).map(([k,v])=>k+" "+v+"ms").join("  ") || "—")}</span></div>
+      ${decisions}
+      <ol class="recs">${recs}</ol>
+    </div>`;
+  $("traces").appendChild(el);
+  el.scrollIntoView({block:"nearest"});
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+                             body: JSON.stringify(body)});
+  return r.json();
+}
+
+$("start").onclick = async () => {
+  $("chat").innerHTML = ""; $("traces").innerHTML = ""; $("hit").innerHTML = "";
+  done = false;
+  const d = await post("/api/start", {sample_id: $("sample").value || null});
+  session = d.session_id; target = d.target;
+  if (d.target) {
+    $("hit").innerHTML = `<div class="turn"><div class="bd" style="font-size:12px">
+      <span style="color:var(--dim)">hidden target</span>
+      <span class="asin">${esc(d.target)}</span><br>${esc(d.target_title)}</div></div>`;
+    bubble("customer", d.message, "customer");
+    window.pending = d.message;
+  } else {
+    $("freebox").style.display = "block";
+  }
+  $("step").disabled = false; $("run").disabled = false;
+};
+
+async function step() {
+  if (!session || done) return false;
+  const text = window.pending ?? $("freetext").value;
+  window.pending = null;
+  if ($("freetext").value) { bubble("customer", text, "customer"); $("freetext").value = ""; }
+
+  const d = await post("/api/turn", {session_id: session, message: text});
+  bubble("agent", d.agent.message, "agent", d.agent.ask_attribute);
+  renderTrace(d.trace, d.turn, d.hit_rank);
+
+  if (d.hit_rank) {
+    $("hit").innerHTML = `<div class="hit-banner">Target found at rank ${d.hit_rank} on turn ${d.turn}</div>`
+                         + $("hit").innerHTML;
+    done = true; $("step").disabled = true; $("run").disabled = true;
+    return false;
+  }
+  if (d.customer) {
+    bubble("customer", d.customer, d.override ? "customer override" : "customer");
+    window.pending = d.customer;
+  }
+  if (d.done) { done = true; $("step").disabled = true; $("run").disabled = true; return false; }
+  return true;
+}
+
+$("step").onclick = step;
+$("run").onclick = async () => { while (await step()) { await new Promise(r => setTimeout(r, 350)); } };
+$("freetext").addEventListener("keydown", e => { if (e.key === "Enter") step(); });
+</script>
+</body>
+</html>
