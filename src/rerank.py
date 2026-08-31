@@ -23,7 +23,25 @@ from pathlib import Path
 
 from src.llm import LLMBackend
 
-CROSS_ENCODER_DIR = Path("models/cross-encoder")
+FALLBACK_CE_DIR = Path("models/cross-encoder")   # committed; always present
+PRIMARY_CE_DIR = Path("models/ce-bge")           # fetched by scripts/fetch_models.py
+
+
+def _cross_encoder_dir() -> Path:
+    """Prefer the fetched bge reranker; fall back to the committed MiniLM.
+
+    bge-reranker-base is worth +0.037 TechnicalScore over MiniLM-L6 once the document
+    representation includes `details` (eval/RESULTS.md run 7), but at ~573MB it is fetched
+    rather than committed. Selecting by presence means a fresh clone works immediately at
+    the lower score and improves after setup, with no config to get wrong.
+    """
+    override = os.environ.get("TECHJAM_CE_DIR", "").strip()
+    if override:
+        return Path(override)
+    return PRIMARY_CE_DIR if (PRIMARY_CE_DIR / "config.json").exists() else FALLBACK_CE_DIR
+
+
+CROSS_ENCODER_DIR = _cross_encoder_dir()
 
 # Funnel widths. Budgeted knob (CLAUDE.md section 9) -- k-fold before changing.
 # CE_WIDTH is how many fused candidates the cross-encoder scores. Cost is linear in it,

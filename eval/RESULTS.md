@@ -20,6 +20,14 @@ Every eval run gets a row. Never claim an improvement that is not written here.
 | 4c | 2026-08-31 | 81508a3 | + refusal-pollution fix (CE on) | **0.77743** | 0.9000 | 0.5701 | 3.18 | 0.782 | 0.9250 | 0.8875 | 0.8667 | 0.9000 | correct, ~neutral |
 | 5 | 2026-08-31 | (this) | + drained/unavailable bookkeeping — **shipping config** | **0.77773** | 0.9000 | 0.5701 | 3.17 | 0.784 | 0.9250 | 0.8875 | 0.8667 | 0.9000 | **KEEP (+0.0165)** |
 | 5c | 2026-08-31 | (this) | Control: same code, CE off — new lexical floor | **0.76125** | 0.8900 | 0.5452 | 3.37 | 0.764 | 0.9000 | 0.8875 | 0.8667 | 0.9000 | offline floor |
+| 6 | 2026-08-31 | (this) | Dense ON, weight x1.0, MMR on — the shipped-by-accident config | **0.69663** | 0.7950 | 0.5428 | 4.19 | 0.682 | — | — | — | — | dense diagnosis |
+| 6a | 2026-08-31 | (this) | Dense ON, weight x0.3, MMR on — best tuned dense weight | **0.76386** | 0.8800 | 0.5679 | 3.33 | 0.768 | — | — | — | — | still loses to OFF |
+| 6b | 2026-08-31 | (this) | Dense ON, weight x0.15, MMR off | **0.76379** | 0.8850 | 0.5556 | 3.27 | 0.773 | — | — | — | — | still loses to OFF |
+| 7 | 2026-08-31 | (this) | `_doc_line` includes `details` — same 22M MiniLM | **0.78671** | 0.9100 | 0.5787 | 3.10 | 0.791 | 0.9375 | 0.9000 | 0.8667 | 0.9000 | **KEEP (+0.0090)** |
+| 7a | 2026-08-31 | (this) | ms-marco-MiniLM-L-12 (33M), old doc | **0.76793** | 0.9000 | 0.5384 | 3.18 | 0.782 | 0.9250 | 0.8875 | 0.8667 | 0.9000 | REJECT — worse than L-6 |
+| 7b | 2026-08-31 | (this) | bge-reranker-base (278M), old doc | **0.78160** | 0.9200 | 0.5407 | 3.03 | 0.797 | 0.9375 | 0.9250 | 0.8667 | 0.9000 | +0.004 for 5.7x runtime |
+| 7c | 2026-08-31 | (this) | **bge-reranker-base + fixed doc — shipping** | **0.81426** | 0.9300 | 0.6265 | 2.94 | 0.807 | 0.9375 | 0.9500 | 0.8667 | 0.9000 | **KEEP (+0.0365)** |
+| 7d | 2026-08-31 | (this) | 7c with `skip_rerank` disabled (`TECHJAM_NO_SKIP=1`) | **0.81502** | 0.9300 | 0.6294 | 2.94 | 0.806 | 0.9375 | 0.9500 | 0.8667 | 0.9000 | +0.0008 — noise |
 
 ## Run 0 notes — where the losses are
 
@@ -235,3 +243,98 @@ observed in the public set is exactly what CLAUDE.md section 9 forbids.
 **Degradation verified:** with `models/` renamed away the agent falls back to the lexical
 track at exactly 0.76125 and does not crash. That is the offline floor, and no paid LLM is
 required to reach it.
+
+## Run 6 notes — the dense track is retired, with a diagnosis rather than a shrug
+
+Track-level measurement over 613 turn-instances, recording where the KNOWN target lands in
+each track (`scripts/` diagnostic, driving the real Agent through the real simulator):
+
+| track | recall@10 | recall@50 | median rank |
+|---|---|---|---|
+| BM25 | **0.4013** | 0.5954 | 3 |
+| dense | 0.2610 | 0.4568 | 7 |
+| RRF, dense weight 1.0 | 0.3899 | **0.6362** | — |
+
+**The index is not broken.** RRF genuinely *improves* recall@50 (0.595 -> 0.636), and dense
+finds the target in 73 turns where BM25 misses it entirely. But the metric scores the top 10,
+and giving a much weaker voter a comparable vote drags targets out of the head: 53 lost
+against 46 gained. Sweeping the weight moves the head damage but never turns a profit:
+
+| dense weight | recall@10 vs BM25 | lost/gained | full-eval TS |
+|---|---|---|---|
+| x1.0 | -0.011 | 53 / 46 | 0.69663 |
+| x0.5 | -0.010 | 44 / 38 | — |
+| x0.3 | **+0.029** | 17 / 35 | 0.76386 |
+| x0.15 | +0.021 | 5 / 18 | 0.76379 |
+| **off** | — | — | **0.77773** |
+
+MMR is ~neutral (0.76386 on vs 0.76094 off). The per-turn recall gain does not convert into
+session hits, because a session hits if *any* turn puts the target in the top 10 and BM25
+already gets there a turn or two later on those sessions.
+
+**Root cause:** `intent_card` copies constraints verbatim out of `features`/`details`, so the
+match is lexical by construction — exactly BM25's strength and exactly what a semantic
+bi-encoder blurs.
+
+**Retired, not just switched off.** Its last surviving rationale was as a hedge against the
+private set paraphrasing constraints. The updated `competition_specification.md` now states
+that **"no undisclosed natural-language paraphrases are introduced"**, so that rationale is
+gone too. Kept in-tree behind `TECHJAM_DENSE=1` as Pillar I's browsing track and a documented
+negative result.
+
+## Run 7 notes — the reranker's problem was a missing field, not model capacity
+
+**Ceiling first.** A perfect reranker over the pool BM25 *already returns*, retrieval
+untouched:
+
+| oracle rerank over | resulting TS |
+|---|---|
+| BM25 top-10 (pure reorder) | 0.8647 |
+| BM25 top-25 | 0.9173 |
+| BM25 top-50 | **0.9440** |
+
+So ~+0.16 sat in ranking alone. Model scale did **not** reach it:
+
+| reranker | params | TS (old doc) | wall |
+|---|---|---|---|
+| ms-marco-MiniLM-L6 (committed) | 22M | 0.77773 | 108s |
+| ms-marco-MiniLM-L12 | 33M | 0.76793 | 184s |
+| BAAI/bge-reranker-base | 278M | 0.78160 | 612s |
+
+A 12.6x larger, far more modern reranker bought **+0.004 for 5.7x the runtime**, and L-12 was
+*worse* than L-6. That is the signature of an input problem, not a capacity problem.
+
+**The input was broken.** `_doc_line` rendered `title | $price | features[:2]` and **no
+`details` at all**, while `intent_card` (local_evaluator.py:52-66) derives every constraint
+from `features` + `details` + a material/colour regex + price. Whenever a constraint came from
+`details` or a later feature, the model was asked to match text the document did not contain.
+No amount of capacity fixes a missing field.
+
+Including `details` and more features:
+
+| | old doc | fixed doc |
+|---|---|---|
+| MiniLM-L6 (22M) | 0.77773 | **0.78671** |
+| bge-reranker-base (278M) | 0.78160 | **0.81426** |
+
+The two **compound super-additively** (+0.009 and +0.004 separately, +0.037 together): the
+bigger model can only exploit signal that is actually present. Note the cheap 22M model on the
+fixed representation (0.78671) **beats the 278M model on the broken one** (0.78160) at a third
+of the runtime — the field mattered more than the parameters.
+
+Shipping is bge + fixed doc: **0.81426**, browsing +0.101 and buying +0.064 over run 5.
+
+**`skip_rerank` was calibrated against the weak model and no longer earns its keep.** Run 7d
+disables it: 0.81502, i.e. **+0.0008**, with intent_override 0.7605 -> 0.7655. The gate was
+worth +0.164 against MiniLM and is worth -0.0008 against bge — its premise ("semantic
+reranking blurs a lexical match it cannot improve") is simply false for a strong ranker. Left
+ON because flipping a default on a noise-level delta is what CLAUDE.md section 9 forbids, but
+it is now a **Pillar III demonstration rather than a score mechanism, and the writeup must say
+so.** Re-decide at the freeze.
+
+**Model provenance and cost.** `BAAI/bge-reranker-base`, Apache-2.0, 278M params, ~573MB fp16,
+fetched by `scripts/fetch_models.py` and **not committed** — `final_evaluation_faq.md` section 4
+states large assets "should be supplied through documented and reproducible download
+instructions rather than committed directly". `src/rerank.py` selects it by presence and falls
+back to the committed MiniLM, so a clone that skips setup still runs, at 0.78671. **Zero API
+cost, zero network at inference.**

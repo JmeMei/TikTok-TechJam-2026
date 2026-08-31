@@ -89,7 +89,9 @@ class Orchestrator:
         # reranking blurs a lexical match it cannot improve. Measured across three runs
         # (eval/RESULTS.md 3c/4/4a): the cross-encoder is +0.041 buying and +0.026 browsing
         # but negative on every override configuration, even with a fully cleaned query.
-        if getattr(state, "override_seen", False):
+        # NOTE: calibrated against the weak 22M MiniLM reranker. A stronger ranker may well
+        # beat BM25 on these sessions too -- re-measure before trusting it (TECHJAM_NO_SKIP=1).
+        if getattr(state, "override_seen", False) and not os.environ.get("TECHJAM_NO_SKIP"):
             plan.rerank = False
             plan.notes.append((
                 "skip_rerank",

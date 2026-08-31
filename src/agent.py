@@ -26,20 +26,58 @@ from src.trace import TurnTrace
 
 CATALOG_DEFAULT = "data/catalog.jsonl"
 
+# Document rendering budget for the ranking stages. The cross-encoder truncates at 384
+# tokens, so ~900 chars is roughly the point past which extra text is discarded anyway.
+_FEATURE_LIMIT = int(os.environ.get("TECHJAM_DOC_FEATURES", "6"))
+_DETAIL_LIMIT = int(os.environ.get("TECHJAM_DOC_DETAILS", "6"))
+_DOC_CHARS = int(os.environ.get("TECHJAM_DOC_CHARS", "900"))
+
 
 def dense_enabled() -> bool:
-    """DEFAULT OFF -- measured, see eval/RESULTS.md run 3/3a/3b.
+    """RETIRED -- default OFF. Diagnosed, not merely switched off (eval/RESULTS.md run 6).
 
-    Committing `data/index/` flipped `DenseIndex.available` to True and switched the dense
-    track on as a silent side effect of shipping a build artifact. It had never been
-    measured. RRF fusion against the weak dense ranking pushes targets out of the top 25
-    and costs HR@10 directly: 0.890 -> 0.810, TechnicalScore 0.76035 -> 0.69589.
+    Committing `data/index/` flipped `DenseIndex.available` to True and switched this track
+    on as a silent side effect of shipping a build artifact, unmeasured. It loses:
 
-    The track stays built and one env var away (TECHJAM_DENSE=1) -- it is the hedge if the
-    private set paraphrases constraints instead of quoting them verbatim, and the code is
-    Pillar I's browsing track. But it does not ship on until it beats BM25 on the full 200.
+        BM25 alone   recall@10 0.4013   TS 0.77773
+        dense alone  recall@10 0.2610
+        RRF w=1.0    recall@10 0.3899   TS 0.69589   (53 targets lost from the head, 46 gained)
+        RRF w=0.3    recall@10 0.4307   TS 0.76386   (best tuned weight, still loses)
+
+    RRF genuinely improves recall@50 (0.595 -> 0.636), so the index is sound -- but the
+    metric scores the top 10, and giving a much weaker voter a comparable vote drags targets
+    out of the head. Down-weighting repairs the damage without ever adding value.
+
+    Root cause: the simulator copies constraints verbatim out of `features`/`details`, which
+    is exactly BM25's strength and exactly what a semantic bi-encoder blurs.
+
+    Its last remaining rationale was as a hedge against the private set paraphrasing
+    constraints. `docs/competition_specification.md` now states that no undisclosed
+    natural-language paraphrases are introduced, so that rationale is gone too.
+
+    Kept in-tree, one env var away (TECHJAM_DENSE=1), as Pillar I's browsing track and a
+    documented negative result. It does not ship on.
     """
     return os.environ.get("TECHJAM_DENSE", "").strip() not in ("", "0", "false")
+
+
+def dense_weight_scale() -> float:
+    """Multiplier on the route's dense RRF weight.
+
+    Diagnosed (eval/RESULTS.md run 6): the dense track's recall@10 is 0.261 against BM25's
+    0.401, but RRF was counting its vote as near-equal, so fusion pulled targets OUT of the
+    head -- 53 lost against 46 gained per 613 turns. A weak voter needs a weak vote.
+    """
+    try:
+        return max(0.0, float(os.environ.get("TECHJAM_DENSE_W", "1.0")))
+    except ValueError:
+        return 1.0
+
+
+def dense_mmr_enabled() -> bool:
+    """MMR trades relevance for diversity. That is the wrong trade when the score is
+    decided by rank 1, so it is separately switchable for measurement."""
+    return os.environ.get("TECHJAM_DENSE_MMR", "1").strip() not in ("0", "false", "")
 
 
 def _doc_line(meta: dict) -> str:
@@ -52,10 +90,19 @@ def _doc_line(meta: dict) -> str:
     price = meta.get("price")
     if price not in (None, ""):
         parts.append(f"${price}")
+
+    # The evaluator derives every constraint from `features` + `details` (plus a material
+    # and colour regex over the whole record, and price) -- intent_card, local_evaluator.py
+    # L52-66. Showing the ranker only features[:2] and NO details meant that whenever a
+    # constraint came from `details` or from a later feature, the model was asked to match
+    # text the document did not contain. Capacity cannot fix a missing field.
     features = meta.get("features") or []
     if features:
-        parts.append("; ".join(str(f) for f in features[:2]))
-    return " | ".join(p for p in parts if p)[:400]
+        parts.append("; ".join(str(f) for f in features[:_FEATURE_LIMIT]))
+    details = meta.get("details") or {}
+    if isinstance(details, dict) and details:
+        parts.append("; ".join(f"{k}: {v}" for k, v in list(details.items())[:_DETAIL_LIMIT]))
+    return " | ".join(p for p in parts if p)[:_DOC_CHARS]
 
 
 class Agent:
@@ -155,7 +202,7 @@ class Agent:
                 dense_hits = self.dense.search(
                     orchestrator.distill(state),
                     limit=plan.truncation,
-                    mmr=(route.name == router.BROWSING),
+                    mmr=(route.name == router.BROWSING and dense_mmr_enabled()),
                 )
             # The dense index is a prebuilt artifact with its own ids.json; it is NOT
             # guaranteed to have been built against the catalog we were constructed with.
@@ -165,7 +212,7 @@ class Agent:
             dense_hits = [(asin, score) for asin, score in dense_hits if asin in self.bm25.meta]
             if dense_hits:
                 rankings.append([asin for asin, _ in dense_hits])
-                weights.append(plan.dense_weight)
+                weights.append(plan.dense_weight * dense_weight_scale())
             trace.pool_sizes["dense"] = len(dense_hits)
 
         # --- Pillar I: RRF fusion ---

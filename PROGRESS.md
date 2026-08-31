@@ -3,13 +3,22 @@
 Working branch: `feat/hybrid-retrieval`. Plan: `~/.claude/plans/adaptive-tumbling-lantern.md`.
 Score ledger: [`eval/RESULTS.md`](eval/RESULTS.md).
 
-**Current best: TechnicalScore 0.77773** (HR@10 0.900 / MRR 0.5701 / MTTC 3.17)
-Lexical-only floor (no models, no network): **0.76125**. Baseline was 0.10671; the
-pre-existing 12-line version was 0.75040.
+**Current best: TechnicalScore 0.81426** (HR@10 0.930 / MRR 0.6265 / MTTC 2.94)
+— bge-reranker-base + the fixed document representation (`eval/RESULTS.md` run 7c).
 
-⚠️ The +0.0165 over the lexical floor is **not significant at n=200** — paired 95% CI
-[-0.014, +0.047], 3/5 folds. See `eval/RESULTS.md` runs 4-5. Treat it as the first ledger
-entry to re-check against the private result rather than trust.
+Three tiers, all measured, so a clone degrades gracefully rather than failing:
+
+| tier | requires | TS |
+|---|---|---|
+| **shipping** | `scripts/fetch_models.py` (fetches bge, ~573MB) | **0.81426** |
+| committed models only | a plain clone, no setup | 0.78671 |
+| lexical floor | no models at all, no network | 0.76125 |
+
+Baseline was 0.10671; the pre-existing 12-line version was 0.75040.
+
+⚠️ The **+0.0165 from the run-5 cascade work is not significant at n=200** (paired 95% CI
+[-0.014, +0.047], 3/5 folds). The +0.037 from run 7c is much larger and moves HR@10 and MRR
+together, but has not been k-folded yet. **Zero API cost, zero network at inference.**
 
 ---
 
@@ -223,35 +232,70 @@ agent degrades to 0.76125 without crashing (the offline floor — no paid LLM re
 
 ## Remaining work, in priority order
 
-### 1. Diagnose the dense track — the only untouched *scored* lever
-Still off (`TECHJAM_DENSE=1`). It is Pillar I's browsing track and the hedge against a
-paraphrasing private set, so it should not stay off permanently. Measure dense-only HR@10
-with no fusion first: that separates "the dense ranking is weak" from "RRF is mis-weighting a
-weak vote as an equal one". Suspects in order: RRF weights, `as_query()` text the encoder was
-not trained for, `truncation=50` too shallow for fusion to recover.
+### 1. Deterministic constraint matching — now the top candidate for the +0.16 gap
+A perfect reranker over BM25's existing top-50 scores **0.944** against our ~0.787, so ~+0.16
+sits in ranking with retrieval untouched (`eval/RESULTS.md` run 7). Two new facts make a
+deterministic matcher the cheapest shot at it:
+
+- `final_evaluation_faq.md` §4: intent cards "are derived from the same frozen catalog
+  metadata available to participants ... they do not use additional hidden variant-level
+  product attributes." Every constraint string is therefore reproducible from our catalog.
+- `competition_specification.md`: "**no undisclosed natural-language paraphrases are
+  introduced**." Constraints stay verbatim substrings, so exact matching is safe rather than
+  a gamble on the private set.
+
+So mirror `intent_card()` over the catalog offline and score candidates by how many disclosed
+constraints they satisfy exactly, on the same fields the evaluator drew them from
+(`features`, `details`, material/colour regex, price). Free, deterministic, offline, and it
+attacks MRR directly — which is where ~60% of the remaining headroom is. `final_evaluation_faq.md`
+§4 explicitly permits "derived attributes, labels, or summaries" and precomputed sidecar files.
+
+Build it as a scoring signal fused with the ranker, not as a replacement: it must degrade to
+the current cascade when nothing matches, and the pillars still have to be visible.
 
 ### 2. Slot parsing and decay (Pillar II)
 `classify_constraint()` (`local_evaluator.py:137-151`) is pure, so mirroring it is correct by
-construction. `drained`/`unavailable` now exist; typed `slots` and decay do not. Expect little
-metric movement — the `"other"` wildcard is already optimal — but the trace needs typed slots
-for the demo, and `router.py` reads `slot_count()` to pick a route.
+construction — and it is the same mirror item 1 needs. `drained`/`unavailable` now exist;
+typed `slots` and decay do not. Expect little metric movement — the `"other"` wildcard is
+already optimal — but the trace needs typed slots for the demo, and `router.py` reads
+`slot_count()` to pick a route.
 
 ### 3. Pillar III — `user_profile` is still ignored entirely
 `reset()` receives `preference_tags`, `average_prior_rating`, `summary`; none is used. Fold in
 as a weak prior that never overrides a disclosed constraint.
 
-### 4. Validation
-- k-fold the run-2 self-refinement gain — still at the noise floor, still untrusted.
-- Verify the Flask demo end-to-end (`make demo`) — written, never run.
-- `HF_HUB_OFFLINE=1` must produce an identical score.
-- Runtime: the CE costs 22s -> 108s per 200 sessions. Fine locally; confirm the private
-  harness has no per-call timeout that this could trip.
+### 4. Re-tune what was calibrated against the weak reranker
+`skip_rerank` (Pillar III) and `CE_WIDTH=25` were both measured against the 22M MiniLM. With
+bge-reranker-base the trade-offs may invert — a stronger ranker may now beat BM25 on override
+sessions too, and a wider funnel may pay. Re-measure both before the freeze.
 
-### 5. Deliverables — none started, none droppable
+### 5. Validation
+- k-fold the run-2 self-refinement gain — still at the noise floor, still untrusted.
+- Verify the Flask demo end-to-end (`make demo`) — written, never run. Note
+  `final_evaluation_faq.md` §7: a UI is **optional and not separately assessed**, but the
+  demo must show "at least one complete multi-turn session".
+- `HF_HUB_OFFLINE=1` must produce an identical score.
+- Runtime is no longer a risk: `final_evaluation_faq.md` §3 confirms there is no
+  organizer-imposed CPU/RAM/GPU/startup/per-response limit, because **we run the final
+  evaluation ourselves**. bge at ~26 min per 200 sessions is acceptable.
+
+### 6. Deliverables — none started, none droppable
 README / Devpost / video script / `architecture.md`, then record and upload the video and flip
-the repo public. An unshipped video or a private repo is a failed submission regardless of
-score. **The Pillar III trace now has real decisions to show** — `intent_override` erasure and
-`skip_rerank` both emit trace records with the signal that triggered them.
+the repo public. **The Pillar III trace now has real decisions to show** — `intent_override`
+erasure and `skip_rerank` both emit trace records with the signal that triggered them.
+
+Required disclosures (`submission_rules.md`, `final_evaluation_faq.md` §3) — these are graded
+under Feasibility, so write them from measured numbers, not estimates: Python version,
+hardware, dependencies, runtime, latency, token usage, estimated model cost, network
+dependencies, and fallback behaviour. Ours is the easy case: **zero API cost, zero network at
+inference, and a documented fallback ladder.**
+
+### 7. Freeze discipline — new, and easy to get wrong
+The Devpost commit **is** the submission. After the 800-session package is released we may not
+touch the Agent, prompts, indexes, or model configuration — we only run it and keep
+`results.json` plus the commit hash and environment details. So model choice, `CE_WIDTH`, and
+every index must be settled *before* the deadline, and the retained `results.json` is the
+evidence the organizer may ask to review.
 
 ## Known risks
 - **The headline gain is unproven.** +0.0165 over the lexical floor, paired 95% CI
@@ -263,10 +307,17 @@ score. **The Pillar III trace now has real decisions to show** — `intent_overr
 - **Runtime.** 22s per 200 sessions lexical-only, 108s with the cross-encoder. Comfortable
   locally, but the private harness may impose a per-call timeout the CE could trip; the
   fallback ladder degrades silently rather than failing, which is the right shape.
-- **Private-set fragility.** `competition_specification.md:40` reserves the right to add
-  "natural-language paraphrasing". The score still leans on constraints being verbatim
-  substrings of the target product. The dense track is the intended hedge — built, and
-  currently a measured -0.0645 regression, so the hedge is not yet available.
-- **The dense track is off.** Pillar I's browsing track exists and is unused at inference.
-  It is demonstrable in the trace and the demo, but "hybrid retrieval" is currently one
-  live track plus a reranker, and the writeup must say so honestly.
+- ~~**Private-set fragility** from natural-language paraphrasing.~~ **RETIRED 31 Aug.**
+  The updated `competition_specification.md` now states that final evaluation messages
+  follow the released evaluator's templates and that **"no undisclosed natural-language
+  paraphrases are introduced"**; `final_evaluation_faq.md` §1 repeats it. Leaning on
+  constraints being verbatim substrings is now a guarantee, not a gamble.
+- **The dense track is retired**, not merely off — diagnosed in `eval/RESULTS.md` run 6 and
+  now without a rationale either, since the paraphrasing hedge was its last one. Pillar I's
+  browsing track exists, is demonstrable in the trace, and is unused at inference: the
+  writeup must say "one live lexical track plus a reranker" and own the negative result
+  rather than implying a live hybrid.
+- **The primary reranker is not committed.** `models/ce-bge` (~573MB) is fetched by
+  `scripts/fetch_models.py`. A clone that skips setup silently scores ~0.037 lower on the
+  committed MiniLM instead of failing loudly. That is the intended trade, but the README
+  must make the setup step unmissable.

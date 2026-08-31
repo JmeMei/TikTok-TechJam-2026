@@ -34,3 +34,8 @@ models/qwen/
 traces/
 results-refactor-check.json
 results-smoke.json
+
+# Primary reranker (~573MB): fetched by scripts/fetch_models.py, never committed.
+# final_evaluation_faq.md section 4 prefers documented download instructions for large assets.
+models/ce-bge/
+models/ce-l12/

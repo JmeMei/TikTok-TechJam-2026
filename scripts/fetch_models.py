@@ -21,6 +21,19 @@ MODELS = {
     "bi-encoder": "sentence-transformers/all-MiniLM-L6-v2",
     "cross-encoder": "cross-encoder/ms-marco-MiniLM-L-6-v2",
 }
+
+# The primary reranker. NOT committed: at ~573MB it exceeds GitHub's 100MB/file limit, and
+# final_evaluation_faq.md section 4 states that "large assets should be supplied through
+# documented and reproducible download instructions rather than committed directly to the
+# repository. There is currently no track-specific package-size limit." So a fetch script is
+# the preferred form, not a workaround.
+#
+# Worth +0.037 TechnicalScore over the committed MiniLM cross-encoder once the document
+# representation includes `details` (eval/RESULTS.md run 7). The committed MiniLM remains the
+# fallback, so the agent still runs -- lower -- if this is never fetched.
+OPTIONAL = {
+    "ce-bge": "BAAI/bge-reranker-base",
+}
 OUT = Path("models")
 
 
@@ -40,10 +53,10 @@ def fetch(name: str, repo: str) -> bool:
     print(f"  {name:14} downloading {repo} ...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(repo)
-        if name == "cross-encoder":
-            model = AutoModelForSequenceClassification.from_pretrained(repo)
-        else:
+        if name == "bi-encoder":
             model = AutoModel.from_pretrained(repo)
+        else:
+            model = AutoModelForSequenceClassification.from_pretrained(repo)
 
         # fp16 on disk. Inference upcasts as needed; this is purely a storage decision
         # so the weights fit in git without LFS.
@@ -58,7 +71,7 @@ def fetch(name: str, repo: str) -> bool:
 
     size_mb = sum(f.stat().st_size for f in target.rglob("*") if f.is_file()) / 1e6
     print(f"  {name:14} OK -> {target}  ({size_mb:.1f} MB)")
-    if size_mb > 100:
+    if size_mb > 100 and name in MODELS:
         print(f"  {'':14} WARNING: >100MB, GitHub will reject without LFS")
     return True
 
@@ -67,8 +80,14 @@ def main() -> int:
     OUT.mkdir(exist_ok=True)
     print("Vendoring ranking encoders (committed to the repo -- the offline floor):")
     ok = all(fetch(name, repo) for name, repo in MODELS.items())
+
+    print("\nFetching the primary reranker (NOT committed -- see module docstring):")
+    primary = all(fetch(name, repo) for name, repo in OPTIONAL.items())
+    if not primary:
+        print(f"  {'':14} the agent still runs on the committed MiniLM, scoring lower")
+
     if ok:
-        print("\nDone. These two are enough for the cascade to work fully offline.")
+        print("\nDone. The committed pair alone runs the pipeline fully offline.")
     else:
         print("\nSome downloads failed. The agent still runs -- the cascade degrades to BM25.")
     return 0 if ok else 1
