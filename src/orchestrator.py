@@ -110,10 +110,19 @@ class Orchestrator:
             ))
 
         # A clarification that did not shrink the pool means the tactic is not working.
+        # The response depends on what is actually available: shifting weight toward the
+        # dense track is only a real decision when that track is live. It is currently
+        # retired (a measured regression), so claiming the shift would make the trace
+        # describe a re-plan that cannot happen -- and an untrue trace is worse than none.
         if telemetry.asked and telemetry.yielded and not telemetry.pool_shrank():
+            dense_live = os.environ.get("TECHJAM_DENSE", "").strip() not in ("", "0", "false")
+            choice = (
+                "shift toward dense track" if dense_live
+                else "no reweight available; dense track retired"
+            )
             plan.notes.append((
                 "reweight",
-                "shift toward dense track",
+                choice,
                 f"pool did not shrink after disclosure ({telemetry.prev_pool_size} -> {telemetry.pool_size})",
             ))
 
