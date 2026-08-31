@@ -1,10 +1,10 @@
-# Shopping Copilot — TikTok TechJam 2026, Track 4
+# Shopping Copilot: TikTok TechJam 2026, Track 4
 
 A conversational shopping agent for the TechJam Conversational E-Commerce Search Challenge.
 Given an anonymized preference profile and a short customer message, the agent has at most
 10 turns to surface a hidden target product from a frozen 50,000-item Amazon Clothing catalog.
 
-**TechnicalScore 0.815121** on the 200 labelled public sessions — 7.6x the provided baseline.
+**TechnicalScore 0.815121** on the 200 labelled public sessions: 7.6x the provided baseline.
 **No LLM. Zero API cost. Zero network at inference.**
 
 The original challenge README is preserved at [`docs/CHALLENGE.md`](docs/CHALLENGE.md).
@@ -33,7 +33,7 @@ By scenario:
 `intent_override` cannot record a hit before the override turn (3 or 4) by construction, so
 its MTTC floor is structural, not a deficiency.
 
-### Graceful degradation — three measured tiers
+### Graceful degradation: three measured tiers
 
 The system never hard-fails on a missing asset; it drops a rung and keeps scoring.
 
@@ -70,10 +70,10 @@ customer message
 
 | Module | Pillar | Role |
 |---|---|---|
-| `src/router.py` `src/retrieval.py` `src/rerank.py` | I — Intent routing & hybrid pipeline | dual-track routing, BM25, RRF fusion, reranking cascade |
-| `src/state.py` `src/policy.py` | II — Dialog strategy | slot accumulation, override erasure, ask-vs-answer |
-| `src/orchestrator.py` `src/trace.py` | III — Self-evolution | context distillation, runtime re-planning, decision trace |
-| `eval/run_eval.py` | IV — Evaluation matrix | 4 scenario breakdowns, k-fold, paired significance |
+| `src/router.py` `src/retrieval.py` `src/rerank.py` | I: Intent routing & hybrid pipeline | dual-track routing, BM25, RRF fusion, reranking cascade |
+| `src/state.py` `src/policy.py` | II: Dialog strategy | slot accumulation, override erasure, ask-vs-answer |
+| `src/orchestrator.py` `src/trace.py` | III: Self-evolution | context distillation, runtime re-planning, decision trace |
+| `eval/run_eval.py` | IV: Evaluation matrix | 4 scenario breakdowns, k-fold, paired significance |
 
 Module boundaries are contracts: `retrieval` never reads dialogue state, `policy` never calls
 a model, `rerank` never issues new retrievals and may only reorder a fixed candidate set.
@@ -83,7 +83,7 @@ a model, `rerank` never issues new retrievals and may only reorder a fixed candi
 1. **`ask_attribute` is an information faucet** (0.107 → 0.750). The starter passed `null`
    every turn, so the customer revealed nothing and it re-ran one query ten times. The
    simulator honours `"other"` as a wildcard matching *any* undisclosed constraint, and holds
-   only four constraints — so two questions drain it.
+   only four constraints, so two questions drain it.
 2. **Intent-override erasure** (0.760 → 0.778). The opening message of an override session
    carries a preference the customer later retracts. Erasing it — rather than accumulating it
    — and promoting the replacement to lead the query recovered +0.087 on those sessions.
@@ -119,7 +119,7 @@ gzip -dc catalog.jsonl.gz > data/catalog.jsonl    # expect 50000 lines
 ./.venv/Scripts/python.exe scripts/fetch_models.py
 ```
 
-### Reproduce the reported score — one command
+### Reproduce the reported score: one command
 
 ```bash
 python -m evaluator.local_evaluator
