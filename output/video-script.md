@@ -14,7 +14,7 @@ so nothing is slow or fails live. Keep `eval/RESULTS.md` and `README.md` open in
 
 > "Track 4 gives you a simulated customer with a hidden target product, a 50,000-item Amazon
 > clothing catalog, and ten turns to surface it. The provided baseline scores 0.107.
-> Ours scores **0.814** — with no LLM, no API key, and no network access at inference."
+> Ours scores **0.815** — with no LLM, no API key, and no network access at inference."
 
 **Screen:** `README.md` results table.
 
@@ -44,50 +44,53 @@ so nothing is slow or fails live. Keep `eval/RESULTS.md` and `README.md` open in
 
 ## 1:00–2:00 — Three scenarios, one command *(the required section)*
 
-**Screen:** run it live. One command, three sessions, in narration order.
+**Screen:** run it live. This prints the literal conversation, not the decision trace.
 
 ```powershell
-python scripts\dump_trace.py --sample public_0001,public_0006,public_0004 --print
+python scripts\dump_dialogue.py --sample public_0009,public_0004,public_0011
 ```
 
 ```
-=== public_0001 [buying] HIT rank 1 turn 2
-  t1  route=buying    stage=cross_encoder ask=other
-  t2  route=browsing  stage=cross_encoder ask=other
+public_0009  [buying]
+CUSTOMER  Handbags & Wallets Totes. A key requirement is: leather.
+AGENT     So far I have material: leather. I'm mostly seeing black, blue or
+          pink. Any preference on colour?
+CUSTOMER  For that, what matters is: Soft Washed PU Leather...; Imported.
+  >>> FOUND IT at rank 1, turn 2
 
-=== public_0006 [browsing] HIT rank 1 turn 3
-  t1  route=browsing  stage=cross_encoder ask=other
-  t2  route=browsing  stage=cross_encoder ask=other
-  t3  route=browsing  stage=cross_encoder ask=other
-
-=== public_0004 [intent_override] HIT rank 1 turn 3
-  t1  route=browsing  stage=cross_encoder ask=other
-  t2  route=browsing  stage=cross_encoder ask=other
-  t3  route=buying    stage=rrf  ask=other
-        intent_override=erase ['Long torso camisole for extra coverage...']
-        skip_rerank=trust the lexical track
+public_0004  [intent_override]
+AGENT     So far I have style: Long torso camisole...; material: polyester...
+CUSTOMER  Actually, ignore my earlier preference. What I need is: polyester.
+AGENT     So far I have material: polyester, Polyester,Cotton,Spandex.
+  >>> FOUND IT at rank 1, turn 3
 ```
 
 Narrate as a progression — three different customers, three hidden products:
 
-> "**Buying.** The customer states a hard requirement up front, so we route to the
-> precision track. Rank 1 on turn 2.
+> "**Buying.** The customer names one requirement. The agent reads the candidates that
+> survived, works out that colour separates them best, and asks about colour — offering
+> black, blue or pink, which are the actual colours in that result set, not a canned list.
+> Rank 1 on turn 2.
 >
-> **Browsing.** This one starts vague — no constraints at all — so we route to exploration
-> and ask. Rank 1 by turn 3.
+> **Intent override.** Watch the summary line. Turn 2 it says *style: long torso camisole,
+> material: polyester*. The customer then retracts the camisole detail — and on turn 3 the
+> style slot is **gone**. We erase contradicted constraints instead of accumulating them.
+> Rank 1.
 >
-> **Intent override.** This customer *changes their mind*. Watch turn 3: the route flips to
-> **buying**, and `intent_override=erase` fires — we **delete** the preference they just
-> retracted instead of accumulating it, and promote the new one to lead the query. Rank 1."
+> **Browsing.** Starts with nothing at all. One material question, and rank 1 by turn 2."
 
-> "Every one of those is a structured trace record with the signal that caused it. Nothing
-> there is hardcoded for these sessions — and all three land on the earliest turn a hit was
-> possible."
+**The point to land — and it is the counter-intuitive one:**
 
-*Why these three:* they are all clean rank-1 hits and fit in eight lines. The fourth scenario,
-`boundary`, is deliberately not traced here — it is ten lines and a miss, and the results table
-at 0:00 already reports it honestly at 0.7730. Showing the weakest scenario's full trace would
-cost a third of the screen for no added insight.
+> "The question is chosen by expected information gain over the surviving candidates:
+> coverage times entropy, recomputed every turn. But look at what goes on the wire."
+
+**Screen:** `python scripts\dump_trace.py --sample public_0009 --print`
+
+> "`ask_attribute` is `other`. The simulator reads only that field, never the prose — and
+> `other` is a wildcard that returns two constraints a turn where a specific bucket returns
+> less. Asking specifically as the *structured* field costs about 0.05. Asking specifically
+> in *prose* costs nothing. So the specificity goes where the customer looks and the yield
+> goes where the evaluator looks."
 
 ---
 
@@ -124,17 +127,23 @@ cost a third of the screen for no added insight.
 
 **Screen:** `eval/RESULTS.md`, scroll the ledger.
 
-> "Eight runs, every one with four scenario breakdowns — **including four negative results we
+> "Eleven runs, every one with four scenario breakdowns — **including five negative results we
 > kept**. Our dense retrieval track loses; it ships disabled and documented. Deterministic
 > constraint matching should have been free and perfect — it lost by 0.044, because
 > '100% cotton' is shared by dozens of near-identical products.
+>
+> And the one we are least comfortable with: adding specialised questions first measured a
+> 0.05 **loss**, and we spent hours blaming the question policy. It was three unrelated bugs —
+> a duplicated ranker query, a query cleanup that shifted every BM25 rank, and a one-off
+> customer refusal we treated as permanent. Moving to GPU cut a 32-minute experiment to 40
+> seconds, and the bisect took twenty minutes."
 >
 > And we report that our dialogue gain has a paired 95% confidence interval of
 > minus-0.014 to plus-0.047 — **not significant at n=200**. We'd rather say that than claim it."
 
 **Screen:** degradation table in `README.md`.
 
-> "It degrades instead of failing: 0.814 with full setup, 0.787 on a plain clone, 0.761 with the
+> "It degrades instead of failing: 0.815 with full setup, 0.787 on a plain clone, 0.761 with the
 > models deleted entirely. We verified that by deleting them."
 
 ---
@@ -147,7 +156,7 @@ cost a third of the screen for no added insight.
 python -m evaluator.local_evaluator
 ```
 
-> "Unmodified official evaluator. **0.814257.** Zero dollars, zero tokens, no network.
+> "Unmodified official evaluator. **0.815121.** Zero dollars, zero tokens, no network.
 >
 > We know our ceiling too — a perfect reranker over the candidates we already retrieve would
 > score 0.944, which tells us retrieval is basically solved and the remaining 0.13 is pure rank
@@ -159,9 +168,10 @@ python -m evaluator.local_evaluator
 
 - [ ] Terminal font ≥ 18pt, dark theme, window wide enough that trace lines don't wrap
 - [ ] All commands pre-run once (models loaded, FTS5 index warm)
-- [ ] All three sessions legible, `public_0004`'s erase line especially — this is the required demonstration
+- [ ] All three sessions legible, `public_0004`'s vanishing `style:` slot especially
+- [ ] `$env:PYTHONIOENCODING = "utf-8"` set — some catalog text is non-ASCII and mangles without it
 - [ ] `eval/RESULTS.md` open in a tab
-- [ ] Final `recommended_technical_score: 0.814257` clearly on screen
+- [ ] Final `recommended_technical_score: 0.815121` clearly on screen
 - [ ] Audio checked — no clipping
 - [ ] Uploaded to YouTube, **set to Public** (not Unlisted), link pasted into Devpost
 
@@ -171,7 +181,7 @@ Drop 2:40–3:10 (rigour section) first — it's the most compressible. If you n
 buying and browsing sessions and keep only `public_0004`:
 
 ```powershell
-python scripts\dump_trace.py --sample public_0004 --print
+python scripts\dump_dialogue.py --sample public_0004
 ```
 
 Never cut section 3 entirely; one complete multi-turn session is the one explicitly required

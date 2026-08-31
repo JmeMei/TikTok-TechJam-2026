@@ -29,6 +29,13 @@ Every eval run gets a row. Never claim an improvement that is not written here.
 | 7c | 2026-08-31 | (this) | **bge-reranker-base + fixed doc — shipping** | **0.81426** | 0.9300 | 0.6265 | 2.94 | 0.807 | 0.9375 | 0.9500 | 0.8667 | 0.9000 | **KEEP (+0.0365)** |
 | 7d | 2026-08-31 | (this) | 7c with `skip_rerank` disabled (`TECHJAM_NO_SKIP=1`) | **0.81502** | 0.9300 | 0.6294 | 2.94 | 0.806 | 0.9375 | 0.9500 | 0.8667 | 0.9000 | +0.0008 — noise |
 | 8 | 2026-08-31 | (this) | Deterministic constraint match replacing the reranker (simulated) | **0.77017** | 0.9000 | 0.5526 | 3.28 | 0.772 | — | — | — | — | **REJECT (-0.0441 vs 7c)** |
+| 9 | 2026-09-01 | 81508a3 | Gain-based targeted questions from turn 1 (CPU) | **0.76365** | 0.8900 | 0.5645 | 3.54 | 0.747 | 0.8750 | 0.9000 | 0.8667 | 1.0000 | REGRESSION -0.051 |
+| 9a | 2026-09-01 | 81508a3 | Same + `CE_WIDTH=50` | **0.74928** | 0.8750 | 0.5486 | 3.64 | 0.736 | 0.8500 | 0.8875 | 0.8667 | 1.0000 | REJECT — wider window is worse |
+| 10 | 2026-09-01 | fe9c3dd | Same code on GPU — fp16/CUDA numerics only | **0.76490** | 0.8900 | 0.5690 | 3.54 | 0.746 | — | — | — | — | +0.00125 vs CPU; 46x faster |
+| 10a | 2026-09-01 | fe9c3dd | Bisect: `TECHJAM_QUERY_VIEW=raw` (undo duplicated query) | **0.80502** | 0.9200 | 0.6194 | 3.04 | 0.796 | — | — | — | — | **+0.027** |
+| 10b | 2026-09-01 | fe9c3dd | Bisect: `TECHJAM_NO_INFO_FILTER=0` | — | — | — | — | — | — | — | — | — | **+0.0083** |
+| 10c | 2026-09-01 | fe9c3dd | Bisect: slot-parsing routing on/off | — | — | — | — | — | — | — | — | — | **exactly 0.000 — inert** |
+| 11 | 2026-09-01 | f7b607f | **Shipping: hybrid emission + all three fixes** | **0.815121** | 0.9350 | 0.6234 | 2.97 | 0.803 | 0.9375 | 0.9500 | 0.9000 | 0.9000 | **KEEP (+0.0009)** |
 
 ## Run 0 notes — where the losses are
 
@@ -375,3 +382,49 @@ bigger pointwise one.
 
 Salvageable: IDF-weight the constraint signal so rare constraints count and boilerplate does
 not, and *fuse* it with the reranker instead of replacing it. Not yet measured.
+
+## Runs 9-11 notes — three bugs wearing a regression's clothes
+
+Adding candidate-derived question selection measured **0.76365**, a 0.051 loss against run
+7c. Every explanation we produced for it was mechanically plausible and wrong.
+
+**Wrong explanation 1: "targeted questions are slower."** Simulated turns-to-disclosure said
+targeted selection needs 4.79 turns to drain all four constraints against the wildcard's 2.00,
+so we predicted -0.01 and got -0.05. The simulation modelled delay but not the misses delay
+causes. Then `public_0017` disproved even that: all four constraints were disclosed by turn 3
+in *every* config, and it still missed.
+
+**Wrong explanation 2: "the reranker window is too narrow."** `public_0017`'s target sat at
+BM25 rank 29, outside `CE_WIDTH=25`, so the reranker never scored it. Widening to 50 fixed
+that session — and lost 0.014 overall (run 9a). The oracle's 0.944-at-top-50 is only reachable
+by a *perfect* ranker; a real one promotes wrong items from the tail too. We had also selected
+that session **because** it failed at width 25, which guaranteed the result.
+
+**What it actually was.** GPU took a run from 32 minutes to 41 seconds (run 10), which made
+bisection cheap. Three unrelated causes:
+
+| cause | cost |
+|---|---|
+| Ranker query duplicated — `as_query()` emitted typed slots *and* raw disclosures once `_parse_slots` populated `slots`, doubling the cross-encoder's input. In baseline `slots` was always empty, so this never fired. | **-0.027** |
+| No-information replies excluded from `query_terms()`. Intuitively right; but the lexical query is an OR over rare terms, so dropping words perturbs every BM25 rank — enough to move a target from 15 to 29, past `CE_WIDTH`. | **-0.0083** |
+| Boundary's **one-off** refusal treated as permanent. Hybrid sends `"other"` as the field, so `"I don't have a preference for other"` marked the wildcard unavailable for the rest of the session. | **-0.25 on boundary** |
+
+Also measured and **inert**: making `slot_count()` real changes routing from stateless to
+stateful and moves the aggregate by exactly 0.000. `stop_asking` is likewise a no-op once
+`exhausted()` returns `None`.
+
+**Run 11, shipping.** Hybrid emission: the structured `ask_attribute` stays `"other"` — the
+wildcard that returns the evaluator's 2.00 constraints/turn against 1.73 for the best targeted
+bucket — while the prose names the highest-expected-gain attribute and offers values read off
+the live candidates. Specificity where the customer looks, yield where the evaluator looks.
+`TECHJAM_HYBRID_ASK=0` sends the specific attribute as the structured field instead and costs
+~0.010.
+
+**0.815121, every scenario at or above run 7c, intent_override +0.020.** The aggregate gain of
++0.0009 is deep inside noise at n=200 — this is not a score win, it is a conversational
+capability that no longer costs anything.
+
+**GPU.** torch 2.13.0+cu126 (the same version as the CPU build, so device is the only
+variable), fp16 on CUDA and fp32 on CPU. 1929s -> 41.7s. GPU and CPU differ in the last
+decimals (0.76365 vs 0.76490 on identical code), so the reported figure must come from the
+device that produces the submission. Ours is the GPU figure.

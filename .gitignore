@@ -39,3 +39,10 @@ results-smoke.json
 # final_evaluation_faq.md section 4 prefers documented download instructions for large assets.
 models/ce-bge/
 models/ce-l12/
+
+# GPU environment (~2.5GB) and eval logs -- reproducible, never committed.
+.venv-gpu/
+eval-*.log
+gpu-install.log
+results-*.json
+traces/

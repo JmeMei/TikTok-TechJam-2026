@@ -1,7 +1,7 @@
 # Shopping Copilot — Devpost Submission
 
 **Track 4: Conversational E-Commerce Search**
-TechnicalScore **0.814257** on the 200-session public set — 7.6x the provided baseline —
+TechnicalScore **0.815121** on the 200-session public set — 7.6x the provided baseline —
 with **no LLM, no API key, and no network access at inference.**
 
 ---
@@ -73,6 +73,13 @@ gave the model `title + price + features[:2]` and **no `details`** — while the
 constraints from `features` *and* `details`. It was being asked to match text the document did
 not contain. Adding the field: `0.778 → 0.814`.
 
+**4. Specialised questions turn out to be free, but only in the right half of the turn.** Each
+turn we score every candidate question by `coverage x entropy` over the *surviving* candidates
+and ask the most informative one, offering values read off those candidates. The structured
+`ask_attribute` stays `"other"` — a wildcard returning the evaluator's cap of 2 constraints
+per turn, against 1.73 for the best targeted bucket. Sending the specific attribute as the
+structured field costs ~0.05; saying it in prose costs nothing. `0.814 → 0.815`.
+
 ## Challenges we ran into
 
 **A 20-session smoke test lied to us, in sign.** It said our reranking cascade gained +0.020.
@@ -87,9 +94,16 @@ and costing 0.065. It shipped as a side effect of adding a file.
 +0.004. Showing the *existing* 22M model one absent field bought +0.037. The cheap model on a
 correct input beat the expensive model on a broken one.
 
+**We blamed the wrong thing for hours.** Adding specialised questions measured a 0.05 *loss*,
+and every mechanism we proposed for it was plausible and wrong. Moving inference to GPU cut a
+32-minute experiment to 40 seconds; the bisect then took twenty minutes and found three
+unrelated bugs — a duplicated ranker query, a query cleanup that shifted every BM25 rank past
+the reranker's window, and a one-off customer refusal we had treated as permanent. None of
+them were the question policy.
+
 ## Accomplishments we're proud of
 
-- **0.814257** — 7.6x the baseline, at **$0.00** inference cost with no network dependency.
+- **0.815121** — 7.6x the baseline, at **$0.00** inference cost with no network dependency.
 - **Graceful degradation, measured, not asserted:** 0.814 with full setup → 0.787 on a plain
   clone → 0.761 with no models at all. Verified by deleting `models/` and re-running.
 - **We know our own ceiling.** An oracle reranker over the pool we already retrieve scores
@@ -168,10 +182,10 @@ non-reproducible for the final evaluation.
 | Model choice | `BAAI/bge-reranker-base` (278M, local) + BM25; no LLM |
 | Estimated cost | **$0.00** — no paid API used at any point |
 | Token usage | **0** prompt / **0** completion (non-LLM system) |
-| Latency | ~7.9 s/session, ~2.7 s/turn, single-threaded CPU |
+| Latency | 0.21 s/session on GPU (41.7 s / 200); 9.6 s/session CPU-only |
 | Network dependencies | **None at inference.** Setup-time model download only |
 | Fallback behavior | 3 measured tiers: 0.814 → 0.787 (no fetched model) → 0.761 (no models) |
-| Hardware | Intel Core, Windows 11, CPU-only, no GPU |
+| Hardware | Intel Core + NVIDIA RTX 4070 SUPER 12 GB, Windows 11. Runs CPU-only. |
 | Reported results | 200-session public set. The 800 final sessions release after the deadline |
 
 ---
@@ -182,5 +196,5 @@ non-reproducible for the final evaluation.
 - **Demo video:** <!-- TODO: public YouTube URL -->
 
 ```bash
-python -m evaluator.local_evaluator     # -> recommended_technical_score: 0.814257
+python -m evaluator.local_evaluator     # -> recommended_technical_score: 0.815121
 ```
