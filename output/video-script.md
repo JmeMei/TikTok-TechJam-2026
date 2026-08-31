@@ -42,39 +42,52 @@ so nothing is slow or fails live. Keep `eval/RESULTS.md` and `README.md` open in
 
 ---
 
-## 1:00–2:00 — One complete multi-turn session *(required)*
+## 1:00–2:00 — Three scenarios, one command *(the required section)*
 
-**Screen:** run it live.
+**Screen:** run it live. One command, three sessions, in narration order.
 
-```bash
-python scripts/dump_trace.py --scenario intent_override --limit 3 --print
+```powershell
+python scripts\dump_trace.py --sample public_0001,public_0006,public_0004 --print
 ```
 
-Point at `public_0004` — **HIT, rank 1, turn 3**:
-
 ```
+=== public_0001 [buying] HIT rank 1 turn 2
+  t1  route=buying    stage=cross_encoder ask=other
+  t2  route=browsing  stage=cross_encoder ask=other
+
+=== public_0006 [browsing] HIT rank 1 turn 3
+  t1  route=browsing  stage=cross_encoder ask=other
+  t2  route=browsing  stage=cross_encoder ask=other
+  t3  route=browsing  stage=cross_encoder ask=other
+
 === public_0004 [intent_override] HIT rank 1 turn 3
-  t1  route=browsing  pools={'bm25': 50, 'fused': 50} stage=cross_encoder ask=other
-  t2  route=browsing  pools={'bm25': 50, 'fused': 50} stage=cross_encoder ask=other
-  t3  route=buying    pools={'bm25': 50, 'fused': 50} stage=rrf           ask=other
+  t1  route=browsing  stage=cross_encoder ask=other
+  t2  route=browsing  stage=cross_encoder ask=other
+  t3  route=buying    stage=rrf  ask=other
         intent_override=erase ['Long torso camisole for extra coverage...']
-        route=buying  skip_rerank=trust the lexical track
+        skip_rerank=trust the lexical track
 ```
 
-Walk the three turns:
+Narrate as a progression — three different customers, three hidden products:
 
-> "**Turn 1** — the customer is vague, so we route to *browsing*, retrieve 50 candidates, rerank
-> them, and ask the wildcard question.
+> "**Buying.** The customer states a hard requirement up front, so we route to the
+> precision track. Rank 1 on turn 2.
 >
-> **Turn 2** — a constraint arrives. Same route, better query.
+> **Browsing.** This one starts vague — no constraints at all — so we route to exploration
+> and ask. Rank 1 by turn 3.
 >
-> **Turn 3** — the customer says *'actually, ignore my earlier preference.'* Watch what happens:
-> the route flips to **buying**, and `intent_override=erase` fires. We **delete** the retracted
-> preference — that whole camisole string — instead of accumulating it, and promote the new
-> constraint to *lead* the query. Hit at **rank 1**."
+> **Intent override.** This customer *changes their mind*. Watch turn 3: the route flips to
+> **buying**, and `intent_override=erase` fires — we **delete** the preference they just
+> retracted instead of accumulating it, and promote the new one to lead the query. Rank 1."
 
-> "Every one of those decisions is a structured trace record with the signal that caused it.
-> Nothing there is hardcoded for this session."
+> "Every one of those is a structured trace record with the signal that caused it. Nothing
+> there is hardcoded for these sessions — and all three land on the earliest turn a hit was
+> possible."
+
+*Why these three:* they are all clean rank-1 hits and fit in eight lines. The fourth scenario,
+`boundary`, is deliberately not traced here — it is ten lines and a miss, and the results table
+at 0:00 already reports it honestly at 0.7730. Showing the weakest scenario's full trace would
+cost a third of the screen for no added insight.
 
 ---
 
@@ -146,7 +159,7 @@ python -m evaluator.local_evaluator
 
 - [ ] Terminal font ≥ 18pt, dark theme, window wide enough that trace lines don't wrap
 - [ ] All commands pre-run once (models loaded, FTS5 index warm)
-- [ ] `public_0004` visible and legible — this is the required multi-turn session
+- [ ] All three sessions legible, `public_0004`'s erase line especially — this is the required demonstration
 - [ ] `eval/RESULTS.md` open in a tab
 - [ ] Final `recommended_technical_score: 0.814257` clearly on screen
 - [ ] Audio checked — no clipping
@@ -154,5 +167,12 @@ python -m evaluator.local_evaluator
 
 ## Cuts if you run long
 
-Drop 2:40–3:10 (rigour section) first — it's the most compressible. Never cut section 3; it is
-the one explicitly required deliverable.
+Drop 2:40–3:10 (rigour section) first — it's the most compressible. If you need more, cut the
+buying and browsing sessions and keep only `public_0004`:
+
+```powershell
+python scripts\dump_trace.py --sample public_0004 --print
+```
+
+Never cut section 3 entirely; one complete multi-turn session is the one explicitly required
+deliverable (`docs/final_evaluation_faq.md` §7).

@@ -32,13 +32,30 @@ def main() -> int:
     parser.add_argument("--out", default="traces/trace.json")
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--scenario", default="", help="buying|browsing|intent_override|boundary")
+    parser.add_argument(
+        "--sample",
+        default="",
+        help="trace specific sample_id(s), comma-separated, e.g. public_0004. "
+             "Overrides --scenario and --limit; output follows the order given.",
+    )
     parser.add_argument("--print", action="store_true", dest="show")
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
-    if args.scenario:
-        samples = [s for s in samples if s["scenario_type"] == args.scenario]
-    samples = samples[: args.limit]
+    if args.sample:
+        # Named sessions, in the order requested -- so a demo can land on one clean
+        # session instead of scrolling past the ones that happen to precede it.
+        wanted = [s.strip() for s in args.sample.split(",") if s.strip()]
+        index = {s["sample_id"]: s for s in samples}
+        missing = [w for w in wanted if w not in index]
+        if missing:
+            print(f"unknown sample_id(s): {', '.join(missing)}")
+            return 1
+        samples = [index[w] for w in wanted]
+    else:
+        if args.scenario:
+            samples = [s for s in samples if s["scenario_type"] == args.scenario]
+        samples = samples[: args.limit]
     if not samples:
         print("no matching sessions")
         return 1
