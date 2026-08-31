@@ -155,6 +155,10 @@ def decide_ask(
         # So keep asking, cycling to a bucket we have not tried. It cannot reveal anything
         # (nothing can), and it cannot pollute retrieval either -- refusals are excluded
         # from both `query_terms()` and `disclosures()`.
+        if os.environ.get("TECHJAM_KEEP_ENGAGING", "1").strip() in ("0", "false"):
+            # Baseline behaviour: go silent once nothing can be revealed.
+            return AskDecision(attribute=None, message=CLOSING,
+                               reason="all buckets drained; committing the turn to ranking")
         attribute, _, options = _select(state, pool_text)
         return AskDecision(
             attribute=attribute,
@@ -179,7 +183,16 @@ def decide_ask(
     # This is not a trick on the evaluator -- it asks a real question about a real
     # attribute, and any answer the customer gives is accepted. It just does not throw
     # away the wildcard's ability to also collect anything else they volunteer.
-    if _hybrid_ask() and "other" not in set(state.drained) | set(state.unavailable):
+    # Gate on `drained` only, never `unavailable`. Draining means the constraint pool is
+    # genuinely empty. `unavailable` comes from the boundary scenario's ONE-OFF refusal
+    # (local_evaluator.py:168-169) -- "no preference this once, use your judgment" -- which
+    # says nothing lasting about the attribute. Treating it as permanent retired the
+    # wildcard for the rest of the session and cost boundary 0.25.
+    if _hybrid_ask() and "other" not in set(state.drained):
+        # The structured field harvests via the wildcard, but the customer heard a question
+        # about `attribute` -- so record it as spoken or we will ask it again next turn.
+        if attribute != "other":
+            getattr(state, "spoken", set()).add(attribute)
         return AskDecision(
             attribute="other",
             message=_phrase(attribute, state, options),
@@ -303,7 +316,7 @@ def _select(state, pool_text: list[str] | None = None) -> tuple[str, str, list[s
     the demo can show *why* a question was chosen; `options` are the real pool values the
     phrasing offers back to the customer.
     """
-    asked = {a for a, _ in getattr(state, "asks", [])}
+    asked = {a for a, _ in getattr(state, "asks", [])} | getattr(state, "spoken", set())
     blocked = set(state.drained) | set(state.unavailable)
 
     scored: list[tuple[float, str, float, list[str]]] = []

@@ -11,6 +11,7 @@ This module must not import retrieval, rerank, or any model.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -165,12 +166,18 @@ class DistilledContext:
             parts.append(self.priority)
         if self.category_hint:
             parts.append(self.category_hint)
-        for bucket, values in self.slots.items():
-            if values:
-                parts.append(f"{bucket}: {', '.join(values)}")
+        # Typed slots are a STRUCTURED view of the same facts the disclosures already
+        # carry, so emitting both says everything twice and doubles what the cross-encoder
+        # reads. Which view the ranker gets is a real choice, not a formatting detail.
+        mode = os.environ.get("TECHJAM_QUERY_VIEW", "raw").strip()
+        if mode in ("both", "slots"):
+            for bucket, values in self.slots.items():
+                if values:
+                    parts.append(f"{bucket}: {', '.join(values)}")
         # Until Stage 5 parses typed slots, the boilerplate-stripped disclosures are the
         # distillation. Deduplicated and compacted -- not a transcript replay.
-        parts.extend(self.disclosures)
+        if mode in ("both", "raw"):
+            parts.extend(self.disclosures)
         return " | ".join(p for p in parts if p)[:600]
 
 
@@ -211,6 +218,10 @@ class SessionState:
         self.asks: list[tuple[str, bool]] = []
 
         self.override_seen = False
+        # Attributes the agent has actually asked about in prose. Distinct from `asks`,
+        # which records the structured field -- under hybrid emission that is always
+        # "other", so without this the same spoken question repeats every turn.
+        self.spoken: set[str] = set()
 
     # ---- ingestion -------------------------------------------------------
 
@@ -337,8 +348,15 @@ class SessionState:
         asking after the pool drains: without it, every follow-up question injects another
         bucket name into the query.
         """
-        informative = [m for m in self.transcript if not NO_INFO_RE.search(m)]
-        return list(dict.fromkeys(terms(" ".join(informative))))[:MAX_TERMS]
+        # DEFAULT OFF -- measured at -0.0083 (eval/RESULTS.md run 10). Excluding these
+        # replies is intuitively right: they carry no preference information. But the
+        # lexical query is an OR over rare terms, and dropping words perturbs every BM25
+        # rank -- enough to push a target across the CE_WIDTH boundary, after which the
+        # reranker never sees it. The junk was not helping; removing it just moved things.
+        source = self.transcript
+        if os.environ.get("TECHJAM_NO_INFO_FILTER", "0").strip() not in ("0", "false"):
+            source = [m for m in self.transcript if not NO_INFO_RE.search(m)]
+        return list(dict.fromkeys(terms(" ".join(source))))[:MAX_TERMS]
 
     def distilled(self) -> DistilledContext:
         """Compact profile for the ranking stages (Pillar III context distillation)."""
@@ -394,4 +412,8 @@ class SessionState:
         return "other" in self.drained
 
     def slot_count(self) -> int:
+        """Router reads this. Before slot parsing existed it was permanently 0, which made
+        routing depend only on the latest message. TECHJAM_SLOT_ROUTE=0 restores that."""
+        if os.environ.get("TECHJAM_SLOT_ROUTE", "1").strip() in ("0", "false"):
+            return 0
         return sum(len(v) for v in self.slots.values())

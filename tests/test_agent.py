@@ -326,11 +326,12 @@ class QuestionValueSelection(unittest.TestCase):
                 ("black", "white", "blue", "red", "pink", "green", "brown", "gray")]
         state = SessionState("q1", {})
         state.observe("I'm looking for Bags.", 1)
-        decision = policy.decide_ask(state, pool_size=len(pool), pool_text=pool)
-        # Colour is what gets SELECTED and SPOKEN...
+        # Selection happens first -- decide_ask marks the attribute spoken, and a spoken
+        # attribute is deliberately not offered again.
         chosen, reason, _ = policy._select(state, pool)
         self.assertEqual(chosen, "color")
         self.assertIn("splits the pool", reason)
+        decision = policy.decide_ask(state, pool_size=len(pool), pool_text=pool)
         self.assertIn("colour", decision.message)
         # ...while the structured field stays the wildcard, which is what the simulator
         # reads and what harvests the full 2-constraint cap. Specificity for the human,
@@ -411,3 +412,19 @@ class IrrelevantQuestionGuards(unittest.TestCase):
         self.assertTrue(policy._already_spoken_to(state, "material"))   # the words say yes
         pool = [f"{m} necklace" for m in ("leather", "cotton", "silk", "wool")] * 5
         self.assertNotEqual(policy.decide_ask(state, pool_text=pool).attribute, "material")
+
+
+class SpokenAttributeTracking(unittest.TestCase):
+    """Under hybrid emission the structured field is always "other", so the attribute the
+    customer actually heard has to be tracked separately or the same question repeats."""
+
+    def test_a_spoken_question_is_not_repeated(self) -> None:
+        pool = [f"{c} leather belt" for c in ("black", "white", "brown", "pink")] * 5
+        state = SessionState("sp1", {})
+        state.observe("I'm looking for Belts.", 1)
+        first = policy.decide_ask(state, pool_size=len(pool), pool_text=pool)
+        self.assertEqual(first.attribute, "other")          # field harvests via wildcard
+        self.assertIn("colour", first.message)              # but colour was asked aloud
+        self.assertIn("color", state.spoken)
+        second = policy.decide_ask(state, pool_size=len(pool), pool_text=pool)
+        self.assertNotIn("colour", second.message, "asked the same question twice")

@@ -284,7 +284,10 @@ class Agent:
         # is a worse product, and the simulator's own reply to a null attribute is
         # "Ask me about one specific attribute" -- so falling silent literally ignores a
         # direct request from the customer.
-        attribute, message = ask.attribute, ask.message
+        if plan.stop_asking and os.environ.get("TECHJAM_STOP_ASKING", "1").strip() not in ("0", "false"):
+            attribute, message = None, policy.CLOSING
+        else:
+            attribute, message = ask.attribute, ask.message
         trace.ask_attribute = attribute
         trace.ask_reason = ask.reason
 
