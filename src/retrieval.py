@@ -144,6 +144,14 @@ class DenseIndex:
             self._model = AutoModel.from_pretrained(
                 str(self.ENCODER_DIR), local_files_only=True
             ).float()
+            # One query is encoded per turn, so this is not the bottleneck -- but keep the
+            # device choice in one place so CPU/GPU is a single decision across the repo.
+            import torch
+
+            from src.rerank import CrossEncoder
+
+            self._device = CrossEncoder._pick_device(torch)
+            self._model = self._model.to(self._device)
             self._model.eval()
             self.available = True
         except Exception:
@@ -156,6 +164,8 @@ class DenseIndex:
         batch = self._tokenizer(
             [text], padding=True, truncation=True, max_length=192, return_tensors="pt"
         )
+        if getattr(self, "_device", "cpu") == "cuda":
+            batch = {key: value.to("cuda") for key, value in batch.items()}
         with torch.no_grad():
             output = self._model(**batch).last_hidden_state
             mask = batch["attention_mask"].unsqueeze(-1).float()

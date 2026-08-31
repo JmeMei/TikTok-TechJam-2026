@@ -32,6 +32,17 @@ _FEATURE_LIMIT = int(os.environ.get("TECHJAM_DOC_FEATURES", "6"))
 _DETAIL_LIMIT = int(os.environ.get("TECHJAM_DOC_DETAILS", "6"))
 _DOC_CHARS = int(os.environ.get("TECHJAM_DOC_CHARS", "900"))
 
+# How many candidates the clarification policy inspects when scoring question value.
+# A wider sample is a better estimate of the value distribution -- entropy over 50 items
+# is noisy, and a single unlucky value can swing which question gets asked. It costs only
+# a regex pass per candidate, no model call.
+POOL_SAMPLE = int(os.environ.get("TECHJAM_POOL_SAMPLE", "50"))
+
+# How deep retrieval goes. The ranking cascade only ever scores CE_WIDTH of these and the
+# answer is the top 10, so going deeper does not change what is ranked -- it changes how
+# much evidence the question policy has to reason over.
+RETRIEVAL_DEPTH = int(os.environ.get("TECHJAM_DEPTH", "0"))
+
 
 def dense_enabled() -> bool:
     """RETIRED -- default OFF. Diagnosed, not merely switched off (eval/RESULTS.md run 6).
@@ -190,8 +201,9 @@ class Agent:
         rankings: list[list[str]] = []
         weights: list[float] = []
 
+        depth = RETRIEVAL_DEPTH or plan.truncation
         with trace.timed("bm25"):
-            lexical = self.bm25.search(terms, limit=plan.truncation)
+            lexical = self.bm25.search(terms, limit=depth)
         if lexical:
             rankings.append([asin for asin, _ in lexical])
             weights.append(plan.bm25_weight)
@@ -222,7 +234,16 @@ class Agent:
         trace.pool_sizes["fused"] = len(candidates)
 
         # --- Pillar II: over-generality cutoff, decided before paying for ranking ---
-        ask = policy.decide_ask(state, pool_size=len(candidates), flat=previous.flat)
+        # The policy scores each candidate question against the pool it would narrow, so it
+        # needs the candidates' text. Capped: entropy over the head is the same shape as
+        # entropy over all of it, and this runs every turn.
+        pool_text = [self.doc_text.get(asin, "") for asin in candidates[:POOL_SAMPLE]]
+        ask = policy.decide_ask(
+            state,
+            pool_size=len(candidates),
+            flat=previous.flat,
+            pool_text=pool_text,
+        )
 
         # --- Pillar I: ranking cascade ---
         if ask.cutoff:
@@ -250,11 +271,20 @@ class Agent:
         trace.recommendations = order
 
         # --- Pillar II: clarification ---
-        if plan.stop_asking:
-            # The orchestrator already recorded this in plan.notes; don't double-log.
-            attribute, message = None, policy.CLOSING
-        else:
-            attribute, message = ask.attribute, ask.message
+        # Self-refining guidance (Pillar III) used to force `ask_attribute=None` here and
+        # fall silent for the rest of the session. Its measured benefit was never "asking
+        # costs a turn" -- asking is free, since recommendations go out on the same turn --
+        # it was that each extra reply fed more terms into an OR'd BM25 query capped at
+        # MAX_TERMS. `query_terms()` now excludes replies that carry no information, which
+        # removes that cost at the source.
+        #
+        # So the orchestrator's judgement is kept, but expressed as a change of TACTIC
+        # rather than silence: stop spending questions on the wildcard and probe specific
+        # buckets instead. A shopping assistant that goes quiet the moment it stops learning
+        # is a worse product, and the simulator's own reply to a null attribute is
+        # "Ask me about one specific attribute" -- so falling silent literally ignores a
+        # direct request from the customer.
+        attribute, message = ask.attribute, ask.message
         trace.ask_attribute = attribute
         trace.ask_reason = ask.reason
 

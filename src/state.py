@@ -50,6 +50,34 @@ class Slot:
     weight: float = 1.0
 
 
+# Exact mirror of the evaluator's classify_constraint (local_evaluator.py:137-151). That
+# function decides which `ask_attribute` a given constraint answers, so mirroring it makes
+# our reading of a disclosure agree with the simulator's by construction -- the same
+# argument that justifies mirroring any pure function. Order matters: the original returns
+# on the first match, and "feature" is the catch-all.
+_MATERIALS = ("cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk",
+              "rayon", "fabric")
+_BUDGET_RE = re.compile(r"(?:\$|<=|under)\s*\d")
+
+
+def classify(value: str) -> str:
+    """Which attribute bucket does this constraint answer?"""
+    lowered = value.lower()
+    if "budget" in lowered or _BUDGET_RE.search(lowered):
+        return "budget"
+    if any(m in lowered for m in _MATERIALS):
+        return "material"
+    if any(w in lowered for w in ("color", "black", "white", "blue", "red", "pink", "green")):
+        return "color"
+    if any(w in lowered for w in ("size", "sizing", "width", "wide", "narrow")):
+        return "size"
+    if any(w in lowered for w in ("department", "style", "fit", "sleeve", "neck")):
+        return "style"
+    if any(w in lowered for w in ("hiking", "running", "gym", "winter", "outdoor", "work")):
+        return "use_case"
+    return "feature"
+
+
 # Fixed boilerplate the simulator wraps around real content. Stripping it is the whole
 # point of distillation: "For that, what matters is:" carries no preference information
 # but does occupy ranker context and dilute the relevance signal.
@@ -73,6 +101,18 @@ BOILERPLATE = re.compile(
 # BM25 dilutes such noise across dozens of OR'd terms; a cross-encoder weighs the whole
 # short string, so this cost the ranking stage far more than it cost retrieval.
 REFUSAL_RE = re.compile(r"i don'?t have (?:an?\s+)?(?:additional\s+)?preference", re.I)
+
+# Every simulator reply that carries ZERO preference information -- the two refusal shapes
+# plus the answer to a null `ask_attribute`. None of them may reach the lexical query:
+# "Those options are not quite right yet. Ask me about one specific attribute." contributes
+# eight junk terms to an OR'd BM25 query that is capped at MAX_TERMS, crowding out real
+# constraints. This is the same class of bug as the refusal leak, one layer down.
+NO_INFO_RE = re.compile(
+    r"i don'?t have (?:an?\s+)?(?:additional\s+)?preference"
+    r"|those options are not quite right yet"
+    r"|ask me about one specific attribute",
+    re.I,
+)
 
 # The same two shapes, but capturing WHICH bucket came back empty, so the policy can stop
 # asking questions that cannot pay. `drained` = the constraint pool holds nothing matching
@@ -189,11 +229,41 @@ class SessionState:
         self.disclosed_last = []
         self._apply_override(self.transcript[-1], turn)
         self._apply_refusal(self.transcript[-1])
+        self._parse_slots(turn)
         # Did this reply actually tell us anything? Until Stage 5 parses constraints,
         # "new search terms arrived" is the honest observable proxy. The orchestrator
         # needs a real signal here -- deriving `yielded` from disclosed_last before it is
         # populated makes it permanently False and fires stop_asking spuriously.
         self.gained_terms = sorted(set(self.query_terms()) - before)
+
+    def _parse_slots(self, turn: int) -> None:
+        """Break each disclosure down into a typed slot -- what the customer actually said.
+
+        This is the decomposition step: instead of holding the dialogue as a bag of words,
+        every constraint is bucketed into the attribute it constrains, so the agent can say
+        what it understands, ask about what it does not, and avoid re-asking what it has.
+
+        `classify()` mirrors the evaluator's `classify_constraint` (local_evaluator.py:137-151)
+        exactly. That function decides which bucket a constraint answers, so mirroring it
+        means our understanding of a disclosure agrees with the simulator's by construction.
+
+        Rebuilt from scratch each turn rather than appended to, so an override that erases a
+        constraint also erases the slot it produced -- "erase and rewrite", not accumulate.
+        """
+        self.slots = {}
+        # The opening carries a constraint too (buying states one outright), and it lives in
+        # `opening_extra` rather than `disclosures()`. It is cleared by an override, so
+        # reading it here means an erased constraint produces no slot -- which is the point.
+        sources = ([self.opening_extra] if self.opening_extra else []) + self.disclosures()
+        for text in sources:
+            for part in re.split(r";|,(?=\s)", text):
+                part = part.strip(" .;,")
+                if not part or part in self.erased:
+                    continue
+                bucket = classify(part)
+                values = self.slots.setdefault(bucket, [])
+                if all(part.lower() != s.text.lower() for s in values):
+                    values.append(Slot(text=part, bucket=bucket, turn=turn))
 
     def _split_opening(self) -> None:
         """Separate the coarse category from the constraint the opening tacked on."""
@@ -258,10 +328,17 @@ class SessionState:
     def query_terms(self) -> list[str]:
         """Deduplicated term list for the lexical track.
 
-        Preserves starter semantics exactly: dedupe by first appearance across the whole
-        accumulated transcript, capped at MAX_TERMS.
+        Dedupe by first appearance across the accumulated transcript, capped at MAX_TERMS.
+
+        Refusals are excluded. "I don't have an additional preference for material" states
+        that the customer has NO material preference, so feeding its words to BM25 searches
+        for the very attribute they just ruled out -- and the bucket name is the one word in
+        the sentence that matches product text. This matters more once the policy keeps
+        asking after the pool drains: without it, every follow-up question injects another
+        bucket name into the query.
         """
-        return list(dict.fromkeys(terms(" ".join(self.transcript))))[:MAX_TERMS]
+        informative = [m for m in self.transcript if not NO_INFO_RE.search(m)]
+        return list(dict.fromkeys(terms(" ".join(informative))))[:MAX_TERMS]
 
     def distilled(self) -> DistilledContext:
         """Compact profile for the ranking stages (Pillar III context distillation)."""

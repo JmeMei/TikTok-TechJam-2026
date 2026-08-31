@@ -15,11 +15,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from src import policy
 from src.agent import Agent
 from src.cache import LRUCache, key_for
 from src.rerank import RankResult, Ranker, _is_flat, _movement
 from src.retrieval import rrf_fuse
-from src.state import SessionState
+from src.state import ATTRIBUTES, SessionState
 
 
 def tiny_catalog(directory: Path) -> Path:
@@ -310,3 +311,103 @@ class RefusalHandling(unittest.TestCase):
         self.assertFalse(state.exhausted())
         state.observe("I don't have an additional preference for other.", 2)
         self.assertTrue(state.exhausted())
+
+
+class QuestionValueSelection(unittest.TestCase):
+    """Pillar II: the question is chosen from the live pool, not a fixed script.
+
+    expected_gain = coverage x entropy. Both come from the candidates, so a question is
+    only asked when it would actually separate them.
+    """
+
+    def test_prefers_the_attribute_that_splits_the_pool(self) -> None:
+        # Every candidate is leather, but colours vary -> asking about material is useless.
+        pool = [f"leather bag in {c}" for c in
+                ("black", "white", "blue", "red", "pink", "green", "brown", "gray")]
+        state = SessionState("q1", {})
+        state.observe("I'm looking for Bags.", 1)
+        decision = policy.decide_ask(state, pool_size=len(pool), pool_text=pool)
+        # Colour is what gets SELECTED and SPOKEN...
+        chosen, reason, _ = policy._select(state, pool)
+        self.assertEqual(chosen, "color")
+        self.assertIn("splits the pool", reason)
+        self.assertIn("colour", decision.message)
+        # ...while the structured field stays the wildcard, which is what the simulator
+        # reads and what harvests the full 2-constraint cap. Specificity for the human,
+        # yield for the evaluator.
+        self.assertEqual(decision.attribute, "other")
+
+    def test_single_valued_attribute_is_not_worth_asking(self) -> None:
+        """Zero entropy: every candidate is the same colour, so the answer changes nothing."""
+        pool = ["black cotton shirt"] * 8
+        state = SessionState("q2", {})
+        state.observe("I'm looking for Shirts.", 1)
+        gain, _, _ = policy._expected_gain("color", pool)
+        self.assertEqual(gain, 0.0)
+        self.assertEqual(policy.decide_ask(state, pool_text=pool).attribute, "other")
+
+    def test_falls_back_to_wildcard_with_no_pool(self) -> None:
+        """An empty pool carries no signal; "other" has maximum coverage by construction."""
+        state = SessionState("q3", {})
+        state.observe("I'm looking for Dresses.", 1)
+        self.assertEqual(policy.decide_ask(state, pool_text=[]).attribute, "other")
+
+    def test_never_repeats_a_drained_bucket(self) -> None:
+        pool = [f"cotton dress in {c}" for c in ("black", "white", "blue", "red")]
+        state = SessionState("q4", {})
+        state.observe("I'm looking for Dresses.", 1)
+        state.observe("I don't have an additional preference for color.", 2)
+        self.assertIn("color", state.drained)
+        self.assertNotEqual(policy.decide_ask(state, pool_text=pool).attribute, "color")
+
+    def test_always_contract_valid(self) -> None:
+        """agent_api_contract.json enumerates the legal values; anything else is invalid."""
+        allowed = set(ATTRIBUTES)
+        pool = ["cotton dress in black", "leather bag in white", ""]
+        state = SessionState("q5", {})
+        state.observe("I'm looking for Dresses.", 1)
+        for turn in range(2, 12):
+            attribute = policy.decide_ask(state, pool_size=50, pool_text=pool).attribute
+            self.assertIn(attribute, allowed)
+            state.observe(f"I don't have an additional preference for {attribute}.", turn)
+
+    def test_questions_do_not_repeat_across_a_session(self) -> None:
+        """The failure this replaced: the same prompt every turn for ten turns."""
+        pool = [f"cotton dress in {c}" for c in ("black", "white", "blue", "red")]
+        state = SessionState("q6", {})
+        state.observe("I'm looking for Dresses.", 1)
+        asked = []
+        for turn in range(2, 8):
+            attribute = policy.decide_ask(state, pool_size=50, pool_text=pool).attribute
+            asked.append(attribute)
+            state.observe(f"I don't have an additional preference for {attribute}.", turn)
+        self.assertEqual(len(asked), len(set(asked)), f"repeated a spent question: {asked}")
+
+
+class IrrelevantQuestionGuards(unittest.TestCase):
+    """Two ways a high-entropy attribute can still be the wrong question."""
+
+    def test_low_coverage_attribute_is_not_asked(self) -> None:
+        """A jewellery pool where only a few items mention a fabric.
+
+        Those few split cleanly, so entropy is high and coverage x entropy clears the
+        gain floor -- which is how the agent came to ask a necklace shopper to choose
+        between leather and cotton. Coverage must hold on its own.
+        """
+        pool = ["alloy pendant necklace"] * 18 + ["leather cord necklace", "cotton cord necklace"]
+        gain, coverage, _ = policy._expected_gain("material", pool)
+        self.assertLess(coverage, policy._MIN_COVERAGE)
+        self.assertGreater(gain, policy._GAIN_FLOOR, "gain floor alone would have allowed it")
+        state = SessionState("g1", {})
+        state.observe("I'm looking for Necklaces.", 1)
+        self.assertNotEqual(policy.decide_ask(state, pool_text=pool).attribute, "material")
+
+    def test_dimension_the_customer_already_named_is_not_re_asked(self) -> None:
+        """"Material:alloy" is filed as a `feature`, because the evaluator's material
+        vocabulary is fabric-only. Naming the dimension still counts as answering it."""
+        state = SessionState("g2", {})
+        state.observe("I'm looking for Necklaces. A key requirement is: Material:alloy.", 1)
+        self.assertEqual(state.slots.get("material"), None)      # our bucketing says no
+        self.assertTrue(policy._already_spoken_to(state, "material"))   # the words say yes
+        pool = [f"{m} necklace" for m in ("leather", "cotton", "silk", "wool")] * 5
+        self.assertNotEqual(policy.decide_ask(state, pool_text=pool).attribute, "material")

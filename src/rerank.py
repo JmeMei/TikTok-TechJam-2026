@@ -103,6 +103,7 @@ class CrossEncoder:
         if not self.model_dir.exists():
             return
         try:
+            import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
             self._tokenizer = AutoTokenizer.from_pretrained(
@@ -111,14 +112,37 @@ class CrossEncoder:
             self._model = AutoModelForSequenceClassification.from_pretrained(
                 str(self.model_dir), local_files_only=True
             )
-            # Weights are stored fp16 to fit in git, but CPU has no fast fp16 kernels --
-            # torch either upcasts per-op or takes a slow path, so running fp16 on CPU is
-            # markedly SLOWER than fp32. Upcast once at load; disk size is unaffected.
-            self._model = self._model.float()
+
+            # Precision is a per-device decision, and the two devices want opposites.
+            #
+            # CPU: weights are stored fp16 to fit in git, but CPU has no fast fp16 kernels
+            # -- torch upcasts per-op or takes a slow path, so fp16 on CPU is markedly
+            # SLOWER than fp32. Upcast once at load.
+            #
+            # CUDA: fp16 runs on tensor cores and is the faster path, so keep the stored
+            # precision. This is where most of the speedup comes from, not the move alone.
+            self._device = self._pick_device(torch)
+            if self._device == "cuda":
+                self._model = self._model.half().to("cuda")
+            else:
+                self._model = self._model.float()
             self._model.eval()
             self.available = True
         except Exception:
             self.available = False
+
+    @staticmethod
+    def _pick_device(torch) -> str:
+        """CUDA when it is present and not explicitly refused.
+
+        TECHJAM_DEVICE=cpu forces the CPU path even on a CUDA box -- needed because GPU
+        and CPU do not produce bit-identical scores (different matmul reduction orders),
+        and a reported number must be reproducible on the machine that produced it.
+        """
+        want = os.environ.get("TECHJAM_DEVICE", "").strip().lower()
+        if want in ("cpu", "cuda"):
+            return want if (want == "cpu" or torch.cuda.is_available()) else "cpu"
+        return "cuda" if torch.cuda.is_available() else "cpu"
 
     def score(self, query: str, documents: list[str]) -> list[float] | None:
         if not self.available or not documents:
@@ -134,8 +158,15 @@ class CrossEncoder:
                 truncation=True,
                 max_length=384,
             )
+            device = getattr(self, "_device", "cpu")
+            if device == "cuda":
+                batch = {key: value.to("cuda") for key, value in batch.items()}
             with torch.no_grad():
                 logits = self._model(**batch).logits
+            # Back to fp32 on the host before .tolist(): fp16 rounding is coarse enough to
+            # create ties between candidates that are genuinely ordered, and a tie here
+            # silently changes the rank the session is scored on.
+            logits = logits.float().cpu()
             return logits.squeeze(-1).tolist() if logits.shape[-1] == 1 else logits[:, -1].tolist()
         except Exception:
             return None
