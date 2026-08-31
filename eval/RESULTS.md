@@ -28,6 +28,7 @@ Every eval run gets a row. Never claim an improvement that is not written here.
 | 7b | 2026-08-31 | (this) | bge-reranker-base (278M), old doc | **0.78160** | 0.9200 | 0.5407 | 3.03 | 0.797 | 0.9375 | 0.9250 | 0.8667 | 0.9000 | +0.004 for 5.7x runtime |
 | 7c | 2026-08-31 | (this) | **bge-reranker-base + fixed doc — shipping** | **0.81426** | 0.9300 | 0.6265 | 2.94 | 0.807 | 0.9375 | 0.9500 | 0.8667 | 0.9000 | **KEEP (+0.0365)** |
 | 7d | 2026-08-31 | (this) | 7c with `skip_rerank` disabled (`TECHJAM_NO_SKIP=1`) | **0.81502** | 0.9300 | 0.6294 | 2.94 | 0.806 | 0.9375 | 0.9500 | 0.8667 | 0.9000 | +0.0008 — noise |
+| 8 | 2026-08-31 | (this) | Deterministic constraint match replacing the reranker (simulated) | **0.77017** | 0.9000 | 0.5526 | 3.28 | 0.772 | — | — | — | — | **REJECT (-0.0441 vs 7c)** |
 
 ## Run 0 notes — where the losses are
 
@@ -338,3 +339,39 @@ states large assets "should be supplied through documented and reproducible down
 instructions rather than committed directly". `src/rerank.py` selects it by presence and falls
 back to the committed MiniLM, so a clone that skips setup still runs, at 0.78671. **Zero API
 cost, zero network at inference.**
+
+## Run 8 notes — deterministic constraint matching loses, and that is informative
+
+`PROGRESS.md` had promoted this to the top candidate for the remaining ~+0.13, on the
+reasoning that constraints are verbatim substrings (guaranteed by the updated spec) and that
+exact matching is therefore free, offline and deterministic. **Measured, it loses.**
+
+Simulated over the same 200 sessions: rerank BM25's top-50 by how many disclosed constraints
+appear verbatim in the product text (price compared numerically), tie-broken by BM25 order.
+Constraints taken from the agent's own `state.disclosures()` — no ground truth.
+
+| approach | TS | HR@10 | MRR |
+|---|---|---|---|
+| lexical floor | 0.76125 | 0.8900 | 0.5452 |
+| deterministic constraint match | **0.77017** | 0.9000 | 0.5526 |
+| bge reranker (shipping, 7c) | **0.81426** | 0.9300 | 0.6265 |
+| oracle over top-50 | 0.94400 | 0.9650 | 0.9650 |
+
+It clears the lexical floor by only +0.009 and loses to the neural reranker by 0.044.
+
+**Why, and it matters for what comes next.** The MRR barely moves (0.5452 -> 0.5526). The
+constraints *are* verbatim, but they are not **discriminative**: strings like
+`machine washable`, `100% cotton` or `Department: Womens` are shared by dozens of
+near-identical clothing products, so a match count ties them all and the tie-break decays to
+BM25 order. Being right about "the constraint appears in this product" does not distinguish
+the target from forty siblings.
+
+**The correct conclusion is the opposite of the original hypothesis.** The remaining gap is
+not literal lookup, which would be free; it is *graded comparative judgement over
+near-identical candidates*. A cross-encoder scores each document independently and therefore
+structurally cannot express "of these 25, this one fits best" — which is the missing
+capability, and the strongest technical argument for a **listwise** LLM rung rather than a
+bigger pointwise one.
+
+Salvageable: IDF-weight the constraint signal so rare constraints count and boilerplate does
+not, and *fuse* it with the reranker instead of replacing it. Not yet measured.

@@ -232,26 +232,37 @@ agent degrades to 0.76125 without crashing (the offline floor — no paid LLM re
 
 ## Remaining work, in priority order
 
-### 1. Deterministic constraint matching — now the top candidate for the +0.16 gap
-A perfect reranker over BM25's existing top-50 scores **0.944** against our ~0.787, so ~+0.16
-sits in ranking with retrieval untouched (`eval/RESULTS.md` run 7). Two new facts make a
-deterministic matcher the cheapest shot at it:
+### 1. Close the ranking gap — deterministic matching MEASURED AND REJECTED
+A perfect reranker over BM25's existing top-50 scores **0.944** against our 0.814, so ~+0.13
+still sits in ranking with retrieval untouched (`eval/RESULTS.md` run 7).
 
-- `final_evaluation_faq.md` §4: intent cards "are derived from the same frozen catalog
-  metadata available to participants ... they do not use additional hidden variant-level
-  product attributes." Every constraint string is therefore reproducible from our catalog.
-- `competition_specification.md`: "**no undisclosed natural-language paraphrases are
-  introduced**." Constraints stay verbatim substrings, so exact matching is safe rather than
-  a gamble on the private set.
+**Deterministic constraint matching was the obvious cheap shot and it loses** (run 8):
 
-So mirror `intent_card()` over the catalog offline and score candidates by how many disclosed
-constraints they satisfy exactly, on the same fields the evaluator drew them from
-(`features`, `details`, material/colour regex, price). Free, deterministic, offline, and it
-attacks MRR directly — which is where ~60% of the remaining headroom is. `final_evaluation_faq.md`
-§4 explicitly permits "derived attributes, labels, or summaries" and precomputed sidecar files.
+| approach | TS | MRR |
+|---|---|---|
+| lexical floor | 0.76125 | 0.5452 |
+| deterministic constraint match | **0.77017** | 0.5526 |
+| bge reranker (shipping) | **0.81426** | 0.6265 |
+| oracle | 0.94400 | 0.9650 |
 
-Build it as a scoring signal fused with the ranker, not as a replacement: it must degrade to
-the current cascade when nothing matches, and the pillars still have to be visible.
+It barely clears the floor and loses to the neural reranker by 0.044. The MRR shows why:
+constraints like `machine washable` or `100% cotton` are shared by dozens of near-identical
+products, so a match count ties them and the tie-break decays to BM25 order. **Exact matching
+is a coarse signal where the task needs a graded one** — the constraints are verbatim, but
+they are not *discriminative*.
+
+That kills the cheapest option and leaves the remaining +0.13 needing genuine comparative
+judgement over near-identical candidates. The most promising untried direction is therefore
+**listwise** ranking: a cross-encoder scores each document independently and structurally
+cannot say "of these 25, this one fits best", which is exactly the missing capability. That is
+the strongest argument for an LLM rung — see the model-choice note below — and it should be
+prototyped on the 200 public set before any commitment.
+
+Cheaper things to try first, since both are free:
+- **Widen `CE_WIDTH`.** It is 25, tuned against the weak MiniLM; the oracle at top-50 (0.944)
+  is much higher than at top-25 (0.917), so the pool is worth more than it costs now.
+- **IDF-weight the constraint signal** and fuse it with the reranker rather than replacing it.
+  Rare constraints discriminate; common ones do not. This is the salvageable part of run 8.
 
 ### 2. Slot parsing and decay (Pillar II)
 `classify_constraint()` (`local_evaluator.py:137-151`) is pure, so mirroring it is correct by
