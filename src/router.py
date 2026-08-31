@@ -7,7 +7,7 @@ filter track for targeted Buying to lock hard constraints, and a diverse dense r
 track for open-ended Browsing to unlock cross-category scenario matching."
 
 Route weights and truncation depth come from CONFIG, never from literals at the call
-site (CLAUDE.md section 3.I: "tunable, not hardcoded").
+site -- the brief requires them "tunable, not hardcoded".
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ BUYING = "buying"
 BROWSING = "browsing"
 MIXED = "mixed"
 
-# The three tuned knobs live here. CLAUDE.md section 9 budgets ~3 total, so additions
+# The three tuned knobs live here. The anti-overfitting budget is ~3 in total, so additions
 # to this dict are a deliberate cost, not a free parameter.
 CONFIG: dict[str, dict] = {
     BUYING: {"bm25_weight": 1.0, "dense_weight": 0.4, "truncation": 50, "hard_filters": True},

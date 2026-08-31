@@ -6,7 +6,7 @@ The matrix is fp16 (50000 x 384 = ~37MB) and IS committed, so scoring never has 
 rebuild it and a fresh clone gets the dense track for free. Only the query side needs
 the encoder at runtime.
 
-The catalog is strictly read-only (CLAUDE.md section 4). This writes to data/index/,
+The catalog is strictly read-only. This writes to data/index/,
 a new directory; it never touches data/catalog.jsonl.
 """
 

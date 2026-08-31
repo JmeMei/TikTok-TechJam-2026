@@ -1,6 +1,6 @@
 """Invariant tests for the agent.
 
-These encode the rules from CLAUDE.md section 4 and competition_specification.md:65 --
+These encode our hard invariants and competition_specification.md:65 --
 "Exceptions, invalid output, and timeouts may count as a miss". The local evaluator only
 charges a turn for a crash, but the official harness may charge the whole session, so
 these are the tests that protect the score rather than the code.

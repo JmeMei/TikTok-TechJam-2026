@@ -20,7 +20,8 @@ eval:
 eval-fast:
 	TECHJAM_DISABLE_LLM=1 $(PY) -m evaluator.local_evaluator --output results-fast.json
 
-# K-fold. Required before trusting any tuned threshold (CLAUDE.md section 9).
+# K-fold. Required before trusting any tuned threshold -- a change that only wins on
+# some folds will not survive the private set.
 eval-fold:
 	$(PY) -m eval.run_eval --folds $(N)
 

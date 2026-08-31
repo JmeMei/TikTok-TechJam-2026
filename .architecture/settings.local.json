@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(time python -m evaluator.local_evaluator)"
+    ]
+  }
+}

@@ -67,7 +67,7 @@ def report(result: dict, baseline: dict | None, elapsed: float) -> None:
         print(f"  vs baseline: {previous['ts']:.5f} -> {overall['ts']:.5f}  "
               f"({delta:+.5f})  [{verdict}]")
         if abs(delta) < 0.01:
-            print("  NOTE: |delta| < 0.01 is inside noise at n=200 (CLAUDE.md section 9).")
+            print("  NOTE: |delta| < 0.01 is inside noise at n=200.")
         print("=" * 66)
 
     # Per-scenario breakdown. An aggregate that rises while one scenario collapses is a

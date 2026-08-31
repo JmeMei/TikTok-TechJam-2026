@@ -1,4 +1,4 @@
-"""Agent interface -- the single integration point. LEAD-OWNED (CLAUDE.md section 5).
+"""Agent interface -- the single integration point.
 
 Pipeline per turn:
 
@@ -6,7 +6,7 @@ Pipeline per turn:
             -> cross-encoder pre-filter -> LLM semantic ranking -> top 10
             -> clarification policy -> trace
 
-HARD INVARIANT (CLAUDE.md section 4): no exception may escape respond() or reset().
+HARD INVARIANT: no exception may escape respond() or reset().
 On internal failure we degrade to the last known-good candidate list rather than raising.
 The local evaluator catches exceptions and charges a turn (-0.02), but
 competition_specification.md:65 warns the official harness may count them as a full miss.
@@ -207,7 +207,7 @@ class Agent:
             # The dense index is a prebuilt artifact with its own ids.json; it is NOT
             # guaranteed to have been built against the catalog we were constructed with.
             # An id the catalog does not contain is stripped by the scorer, so emitting
-            # one silently wastes a ranking slot (CLAUDE.md section 4). Validate at the
+            # one silently wastes a ranking slot. Validate at the
             # boundary -- this is the only place a foreign id can enter the pipeline.
             dense_hits = [(asin, score) for asin, score in dense_hits if asin in self.bm25.meta]
             if dense_hits:

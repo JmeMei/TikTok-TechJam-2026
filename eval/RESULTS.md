@@ -108,7 +108,7 @@ nothing, stop asking and spend the remaining turns on ranking.
 | MRR | 0.5400 | 0.5452 | +0.005 |
 | MTTC | 3.455 | 3.410 | -0.045 |
 
-Right at the +0.01 noise threshold for n=200 (`CLAUDE.md` §9), so it needs k-fold before it is
+Right at our +0.01 noise threshold for n=200, so it needs k-fold before it is
 trusted. Kept for now on two grounds: it moved every component in the right direction, and it
 is a required pillar behaviour rather than a tuned constant.
 
@@ -229,8 +229,8 @@ spread is 0.095, far wider than the gain. The single real effect is on **buying*
 
 Kept anyway, on three grounds, and flagged rather than claimed:
 1. The point estimate is positive on the 160 sessions the ranker still runs on.
-2. These are mechanisms, not tuned constants — CLAUDE.md section 9's generalisation concern is
-   about fitted thresholds, and the only new condition is a boolean read off dialogue state.
+2. These are mechanisms, not tuned constants — our generalisation concern is about fitted
+   thresholds, and the only new condition is a boolean read off dialogue state.
 3. Override erasure is **required** by Pillar II regardless of score, and it is now verified
    score-neutral on the lexical track (5c reproduces the floor exactly).
 
@@ -239,7 +239,7 @@ entry in the ledger that should be re-checked against the private result rather 
 
 **Boundary regresses (-0.060) and is deliberately not fixed.** n=10 cannot resolve a 0.06
 effect, HR@10 is identical (0.9000) with only MRR moving, and special-casing a scenario
-observed in the public set is exactly what CLAUDE.md section 9 forbids.
+observed in the public set is exactly what our anti-overfitting rule forbids.
 
 **Degradation verified:** with `models/` renamed away the agent falls back to the lexical
 track at exactly 0.76125 and does not crash. That is the offline floor, and no paid LLM is
@@ -329,7 +329,7 @@ Shipping is bge + fixed doc: **0.81426**, browsing +0.101 and buying +0.064 over
 disables it: 0.81502, i.e. **+0.0008**, with intent_override 0.7605 -> 0.7655. The gate was
 worth +0.164 against MiniLM and is worth -0.0008 against bge — its premise ("semantic
 reranking blurs a lexical match it cannot improve") is simply false for a strong ranker. Left
-ON because flipping a default on a noise-level delta is what CLAUDE.md section 9 forbids, but
+ON because flipping a default on a noise-level delta is what our anti-overfitting rule forbids, but
 it is now a **Pillar III demonstration rather than a score mechanism, and the writeup must say
 so.** Re-decide at the freeze.
 

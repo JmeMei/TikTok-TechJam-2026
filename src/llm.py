@@ -7,7 +7,7 @@ Three backends, resolved once at construction:
 
 CRITICAL INVARIANT (competition_specification.md:65 -- "Exceptions, invalid output, and
 timeouts may count as a miss"): nothing in this module may raise to the caller, and every
-call runs under a wall-clock budget. CLAUDE.md section 4 requires a *timeout*, not merely
+call runs under a wall-clock budget. Our invariant requires a *timeout*, not merely
 a try/except -- a try/except catches a raise but not a hang.
 """
 

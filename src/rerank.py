@@ -43,7 +43,7 @@ def _cross_encoder_dir() -> Path:
 
 CROSS_ENCODER_DIR = _cross_encoder_dir()
 
-# Funnel widths. Budgeted knob (CLAUDE.md section 9) -- k-fold before changing.
+# Funnel widths. A tuned knob -- k-fold before changing; the budget is ~3 in total.
 # CE_WIDTH is how many fused candidates the cross-encoder scores. Cost is linear in it,
 # and it was the dominant term in a 25s/session smoke run at 50.
 # DEFAULT ON at 25 -- see eval/RESULTS.md runs 3c-5. It was default-off while the distilled
