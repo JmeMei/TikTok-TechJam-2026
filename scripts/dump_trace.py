@@ -16,8 +16,13 @@ import json
 import sys
 from pathlib import Path
 
-from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl
-from src.agent import Agent
+# Running a file inside scripts/ puts scripts/ on sys.path, not the repo root, so the
+# `evaluator` and `src` packages are invisible. Prepend the root so both
+# `python scripts/dump_trace.py` and `python -m scripts.dump_trace` work.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from evaluator.local_evaluator import catalog_index, evaluate, load_jsonl  # noqa: E402
+from src.agent import Agent  # noqa: E402
 
 
 def main() -> int:
