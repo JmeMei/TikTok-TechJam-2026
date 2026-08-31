@@ -1,7 +1,7 @@
 # Demo video script — Shopping Copilot, Track 4
 
 **Target length: 3:00–3:30.** Backend walkthrough, no UI.
-`final_evaluation_faq.md` §7: a UI is optional and **not separately assessed**, but the demo
+`docs/final_evaluation_faq.md` §7: a UI is optional and **not separately assessed**, but the demo
 **must show at least one complete multi-turn session**. Section 3 below is therefore the one
 non-negotiable part.
 
