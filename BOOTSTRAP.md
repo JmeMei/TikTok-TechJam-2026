@@ -1,4 +1,4 @@
-# Bootstrap — run once, in your own terminal (PowerShell or WSL)
+# Bootstrap - run once, in your own terminal (PowerShell or WSL)
 
 Target layout: this folder (`E:\TikTok Hackaton 2026`) **becomes** the repo root, so
 `CLAUDE.md` and `.claude/` sit at the top level where Claude Code will find them.
@@ -25,7 +25,7 @@ of that file. Rename yours (`mv CLAUDE.md CLAUDE.mine.md`), redo the checkout, t
 ## 2. Get the catalog (no `gh` needed)
 
 Only two of the three release assets matter. `techjam-participant-kit.zip` is the same catalog
-bundled with the starter code you already have from git — skip it.
+bundled with the starter code you already have from git - skip it.
 
 **PowerShell:**
 
@@ -37,7 +37,7 @@ curl.exe -L -o SHA256SUMS       "$base/SHA256SUMS"
 ```
 
 Use `curl.exe`, not `curl`. In PowerShell bare `curl` is an alias for `Invoke-WebRequest`, which
-does not understand `-L -o` and will fail confusingly. `-L` follows redirects — GitHub redirects
+does not understand `-L -o` and will fail confusingly. `-L` follows redirects - GitHub redirects
 release downloads to a CDN, so without it you get a short HTML stub instead of 19 MB of data.
 
 **Verify before decompressing:**
@@ -57,7 +57,7 @@ looks like a catalog, and every score you measure this weekend would be quietly 
 python -c "import gzip,shutil; shutil.copyfileobj(gzip.open('catalog.jsonl.gz','rb'), open('data/catalog.jsonl','wb'))"
 ```
 
-Sanity check — expect 50000:
+Sanity check - expect 50000:
 
 ```powershell
 python -c "print(sum(1 for _ in open('data/catalog.jsonl',encoding='utf-8')))"
@@ -86,7 +86,7 @@ pip install numpy faiss-cpu rank-bm25 scikit-learn sentence-transformers
 ```
 
 The starter is pure stdlib, so the venv exists for what *you* add. Everything must run
-in-process and in-memory — `faiss-cpu`, never a vector DB server.
+in-process and in-memory - `faiss-cpu`, never a vector DB server.
 
 ## 4. Record the baseline before writing a single line of code
 
@@ -108,7 +108,7 @@ git add .gitignore CLAUDE.md BOOTSTRAP.md .claude
 git commit -m "chore: agent workspace + bootstrap"
 ```
 
-Never commit `.env` or a key — secrets anywhere in git history are disqualifying, including
+Never commit `.env` or a key - secrets anywhere in git history are disqualifying, including
 in a commit you later reverted. Keep the repo **private** until you flip it public at
 submission.
 
@@ -127,8 +127,8 @@ Then, in order:
 /eval                    # referee records the baseline in eval/RESULTS.md
 ```
 
-Run `/spec` first. Question 4 — whether `ask_attribute` changes what the simulated customer
-reveals — decides whether attribute selection is the highest-leverage code in the repo or
+Run `/spec` first. Question 4 - whether `ask_attribute` changes what the simulated customer
+reveals - decides whether attribute selection is the highest-leverage code in the repo or
 decorative. Do not design the dialogue policy before you know.
 
 ## 7. Then parallelise
@@ -141,7 +141,7 @@ Disjoint file ownership means these run at the same time without collisions:
 > Use the orchestrator agent to design the turn trace schema in src/trace.py.
 ```
 
-You integrate their work in `src/agent.py` yourself — that file has one owner, always — then
+You integrate their work in `src/agent.py` yourself - that file has one owner, always - then
 run `/eval` once on the combined state.
 
 ## Daily rhythm

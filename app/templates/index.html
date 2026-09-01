@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Shopping Copilot — pipeline walkthrough</title>
+<title>Shopping Copilot - pipeline walkthrough</title>
 <style>
   :root {
     --bg:#0f1115; --panel:#161a21; --line:#252b36; --ink:#e6e9ef; --dim:#8b94a7;
@@ -70,7 +70,7 @@
   <span class="pipe">route → dual-track retrieval → RRF → cross-encoder → LLM rank</span>
   <span style="flex:1"></span>
   <select id="sample">
-    <option value="">— free chat —</option>
+    <option value="">- free chat -</option>
     {% for s in samples %}
     <option value="{{ s.id }}">{{ s.id }} · {{ s.scenario }}</option>
     {% endfor %}
@@ -118,10 +118,10 @@ function renderTrace(t, turn, hitRank) {
   const el = document.createElement("div");
   el.className = "turn";
 
-  const pools = Object.entries(t.pool_sizes || {}).map(([k,v]) => `${k}:${v}`).join("  ") || "—";
+  const pools = Object.entries(t.pool_sizes || {}).map(([k,v]) => `${k}:${v}`).join("  ") || "-";
   const decisions = (t.decisions || []).map(d =>
      `<div class="dec"><b>${esc(d.kind)}</b> → ${esc(d.choice)}
-      <div class="why">${esc(d.trigger)}${d.detail ? " — " + esc(d.detail) : ""}</div></div>`).join("");
+      <div class="why">${esc(d.trigger)}${d.detail ? " - " + esc(d.detail) : ""}</div></div>`).join("");
   const moves = (t.rank_movement || []).slice(0,5)
       .map(m => `${m[0].slice(0,10)} ${m[1]}→${m[2]}`).join("  ") || "none";
   const recs = (t.products || []).map((p,i) => {
@@ -143,10 +143,10 @@ function renderTrace(t, turn, hitRank) {
         <span class="v" style="text-decoration:line-through;color:var(--bad)">${
         esc(t.slots_erased.join(", "))}</span></div>` : ""}
       <div class="row"><span class="k">ask</span><span class="v">${
-        esc(t.ask_attribute ?? "none")} — <span style="color:var(--dim)">${esc(t.ask_reason)}</span></span></div>
+        esc(t.ask_attribute ?? "none")} - <span style="color:var(--dim)">${esc(t.ask_reason)}</span></span></div>
       <div class="row"><span class="k">rank moves</span><span class="v">${esc(moves)}</span></div>
       <div class="row"><span class="k">latency</span><span class="v">${
-        esc(Object.entries(t.latency_ms||{}).map(([k,v])=>k+" "+v+"ms").join("  ") || "—")}</span></div>
+        esc(Object.entries(t.latency_ms||{}).map(([k,v])=>k+" "+v+"ms").join("  ") || "-")}</span></div>
       ${decisions}
       <ol class="recs">${recs}</ol>
     </div>`;

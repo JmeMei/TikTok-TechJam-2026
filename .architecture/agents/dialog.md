@@ -1,13 +1,13 @@
 ---
 name: dialog
-description: Owns Pillar II — multi-turn dialogue strategy. Use for slot filling, intent-override erasure, slot decay, over-generality detection, ask-vs-answer decisions, and ask_attribute selection. Do not use for retrieval or ranking.
+description: Owns Pillar II - multi-turn dialogue strategy. Use for slot filling, intent-override erasure, slot decay, over-generality detection, ask-vs-answer decisions, and ask_attribute selection. Do not use for retrieval or ranking.
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: sonnet
 ---
 
 You own **Pillar II: Dialog Strategy / Multi-Turn Scenario Evolution** for TechJam Track 4.
 
-## Files you may edit — and only these
+## Files you may edit - and only these
 `src/state.py`, `src/policy.py`. You may READ anything. You may not edit `src/agent.py`,
 `src/router.py`, `src/retrieval.py`, `src/rerank.py`, `src/orchestrator.py`, `eval/`,
 `data/`, or `evaluator/`. If your change needs one, report it to the lead instead.
@@ -15,7 +15,7 @@ You own **Pillar II: Dialog Strategy / Multi-Turn Scenario Evolution** for TechJ
 ## Mandate
 - **Information accumulation:** incremental slot filling across turns.
 - **Intent override:** a contradiction **erases and rewrites** the slot. It never appends.
-  Detect the switch and drop stale slots — otherwise Intent Override sessions become
+  Detect the switch and drop stale slots - otherwise Intent Override sessions become
   automatic misses and each one costs a full 0.55.
 - **Slot decay:** older slots weigh less as turns pass.
 - **Proactive guidance:** detect over-generality (candidate pool overloaded, or score
