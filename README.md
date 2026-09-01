@@ -33,6 +33,12 @@ By scenario:
 `intent_override` cannot record a hit before the override turn (3 or 4) by construction, so
 its MTTC floor is structural, not a deficiency.
 
+![Full 200-session evaluator run printing recommended_technical_score 0.815121, with the per-scenario breakdown for boundary, browsing, buying and intent_override](docs/images/demo-evaluator-run.png)
+
+*A full `python -m evaluator.local_evaluator` run on the 200 labelled public sessions. Both
+tables above are read straight off this output. Note `reported_token_usage` is all zeros: no
+LLM is called at any point.*
+
 ### Graceful degradation: three measured tiers
 
 The system never hard-fails on a missing asset; it drops a rung and keeps scoring.
@@ -190,6 +196,51 @@ costs nothing. Specificity where the customer looks, yield where the evaluator l
 The trace records the real reasoning per turn, e.g.
 `highest expected information gain: color splits the pool 7 ways over 54% of candidates
 (0.87 bits)`.
+
+---
+
+## Demo run: three sessions, turn by turn
+
+`scripts/dump_dialogue.py` replays any public session and prints the customer and agent turns
+with the structured `ask_attribute` beside each question, so the wildcard behaviour described
+above is visible rather than asserted.
+
+```bash
+python scripts/dump_dialogue.py --sample public_0009,public_0004,public_0011
+```
+
+![Three replayed sessions: public_0009 buying found at rank 1 on turn 2, public_0004 intent_override found at rank 1 on turn 3 after the customer retracts a preference, and public_0011 browsing found at rank 8 on turn 2](docs/images/demo-dialogues-found.png)
+
+Each one shows a different mechanism from the sections above:
+
+- **`public_0009` (buying), rank 1 by turn 2.** The agent leads with the disclosed
+  requirement (`leather`), then asks about colour in prose while sending `"other"` as the
+  structured field. Two turns drain the customer's four constraints.
+- **`public_0004` (intent_override), rank 1 by turn 3.** The customer opens with a style
+  preference and retracts it on turn 3 with *"Actually, ignore my earlier preference."* The
+  agent's next summary no longer carries the retracted style, only the surviving material
+  slots: that is the erasure described in change 2.
+- **`public_0011` (browsing), rank 8 by turn 2.** A hit, but a mediocre one. The target is
+  found inside the top 10 rather than at the head, which is the rank-quality gap the
+  limitations section quantifies.
+
+### And one the agent does not solve
+
+```bash
+python scripts/dump_dialogue.py --sample public_0074
+```
+
+![Replay of public_0074, a browsing session that exhausts all 10 turns; after the constraint pool drains the agent cycles through category, material, size, style, brand, budget and use_case questions and the target is never surfaced](docs/images/demo-dialogue-miss.png)
+
+`public_0074` is one of the 13 misses in the 200. By turn 4 the customer has answered
+*"I don't have an additional preference"* to the wildcard, so the constraint pool is drained
+and there is nothing left to harvest. The agent then walks the remaining slots
+(category, material, size, style, brand, budget, use_case) rather than falling silent, which
+is `TECHJAM_KEEP_ENGAGING=1`. It costs nothing and occasionally recovers a session, but here
+the disclosed constraints (`mesh`, `Imported`, `Synthetic sole`) are shared by hundreds of
+walking shoes, and no further question separates them. This is the *comparative judgement*
+limitation, in a single session: retrieval had its chance and the reranker could not order
+what it was given.
 
 ## Model choice, cost, latency, and token usage
 
